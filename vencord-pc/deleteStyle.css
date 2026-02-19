@@ -1,0 +1,45 @@
+.usl-deleted {
+    background-color: hsl(0 85% 61% / 15%) !important;
+}
+
+.usl-deleted [class*="buttons"] {
+    display: none;
+}
+
+.usl-deleted:is(.emoji,
+    [data-type="sticker"],
+    [class*="embedIframe"],
+    [class*="embedSpotify"],
+    [class*="imageContainer"]) {
+    filter: grayscale(1) !important;
+    transition: 150ms filter ease-in-out;
+
+    &:hover {
+        filter: grayscale(0) !important;
+    }
+}
+
+/* Edit History: Alte Versionen abgedunkelt anzeigen */
+.usl-edited {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 2px 0;
+    border-left: 2px solid hsl(38 95% 60% / 50%);
+    padding-left: 8px;
+    margin-top: 2px;
+    margin-bottom: 4px;
+}
+
+.theme-dark .usl-edited {
+    filter: brightness(80%);
+}
+
+.theme-light .usl-edited {
+    opacity: 0.6;
+}
+
+.usl-edited-timestamp {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
