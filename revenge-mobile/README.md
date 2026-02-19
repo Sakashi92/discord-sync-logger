@@ -11,14 +11,17 @@ It logs edited and deleted messages to a configured Discord Webhook.
 
 ## Installation in Revenge
 
-1. **Upload this folder** to a GitHub repository (or use the raw link if you have one).
+1. **Upload** your changes to GitHub (done).
 2. Open **Revenge Settings** in your Discord Android app.
 3. Go to **Plugins**.
 4. Click the **+** (Add) button.
-5. Enter the **Raw Link** to the `index.js` file.
-   - Example: `https://raw.githubusercontent.com/YourUser/YourRepo/main/revenge-mobile/index.js`
-   - _Note: Use the actual URL where you hosted this file._
-6. The plugin should install and appear in the list.
+5. Enter the **jsDelivr Link** to the `revenge-mobile` folder:
+   
+   `https://cdn.jsdelivr.net/gh/Sakashi92/discord-sync-logger@main/revenge-mobile/`
+
+   _Note: The link must end with a slash `/`._
+
+6. The plugin "UniversalSyncLogger" should appear. Install it.
 7. Tap the **Settings (Gear)** icon next to the plugin to configure your **Webhook URL**.
 
 ## Configuration
