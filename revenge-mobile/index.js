@@ -1,11 +1,11 @@
 (function () {
-    const VERSION = "1.4.1";
+    const VERSION = "1.5.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
-    const { metro, logger, plugin, ui, utils, navigation } = api;
+    const { metro, logger, plugin, ui, utils, patcher } = api; // Added patcher
     const { common } = metro;
-    const { FluxDispatcher, React, ReactNative } = common;
+    const { FluxDispatcher, React, ReactNative, moment } = common; // Added moment if available? commonly is.
     const { storage } = plugin;
 
     const { View, Text, ScrollView, TouchableOpacity } = ReactNative;
@@ -16,6 +16,7 @@
     const messageCache = new Map();
     let MessageStore = metro.findByStoreName("MessageStore");
     let UserStore = metro.findByStoreName("UserStore");
+    let patches = [];
 
     // Helpers
     const log = {
@@ -25,16 +26,9 @@
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // ANSI Helper
-    // 41 = Red Background, 43 = Yellow Background, 0 = Reset
-    // 30 = Black Text (good for light backgrounds), 37 = White Text
+    // ANSI Helper (Yellow Background=43, Red=41)
     function toAnsi(text, type) {
-        // Wrap content in block
-        // Type: "DELETE" | "EDIT"
-        const bgCode = type === "DELETE" ? "41" : "43"; // 41=Red, 43=Yellow
-        // Force white text on red? or just default?
-        // Let's try standard white/default text on colored BG.
-        // \u001b[0;41m ... \u001b[0m
+        const bgCode = type === "DELETE" ? "41" : "43";
         return `\`\`\`ansi\n\u001b[0;${bgCode}m${text}\u001b[0m\n\`\`\``;
     }
 
@@ -46,7 +40,7 @@
         }
 
         const existing = messageCache.get(msg.id);
-        const historyContent = existing?.historyContent || null;
+        const historyContent = existing?.historyContent || null; // Preserve
 
         let attachments = [];
         if (msg.attachments) {
@@ -157,149 +151,7 @@
         }
     }
 
-    // --- Handlers ---
-    const onMessageUpdate = (event) => {
-        try {
-            const { message } = event;
-            if (!message?.id) return;
-            if (message.__isGhost) return;
-
-            if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
-            const storeMsg = MessageStore.getMessage(message.channel_id, message.id);
-            const cached = messageCache.get(message.id);
-
-            const oldContent = cached?.content ?? storeMsg?.content;
-            const author = cached?.author ?? storeMsg?.author ?? message.author;
-            const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
-
-            if (!author || shouldIgnore(author)) return;
-            if (message.content === undefined) return;
-
-            if (oldContent !== undefined && oldContent !== message.content) {
-                sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
-
-                if (storage.editHistory) {
-                    const prevDisplay = cached?.historyContent || null;
-
-                    // ANSI Yellow Background for OLD content
-                    const ansiBlock = toAnsi(oldContent, "EDIT"); // Yellow
-
-                    let newDisplay = "";
-                    if (!prevDisplay) {
-                        newDisplay = `${ansiBlock}${message.content}`;
-                    } else {
-                        newDisplay = `${prevDisplay}${ansiBlock}${message.content}`;
-                    }
-
-                    setTimeout(() => {
-                        FluxDispatcher.dispatch({
-                            type: "MESSAGE_UPDATE",
-                            message: {
-                                ...message,
-                                content: newDisplay,
-                                __isGhost: true
-                            }
-                        });
-                    }, 50);
-
-                    messageCache.set(message.id, {
-                        content: message.content,
-                        author,
-                        channelId: message.channel_id,
-                        attachments,
-                        timestamp: new Date(),
-                        historyContent: newDisplay
-                    });
-
-                    return;
-                }
-            }
-            cacheMessage({ ...storeMsg, ...cached, ...message, author });
-        } catch (e) { log.error("Update Error", e); }
-    };
-
-    const onMessageDelete = (event) => {
-        try {
-            const { id, channelId } = event;
-            if (!id) return;
-            const cached = messageCache.get(id);
-            const author = cached?.author;
-
-            if (!author || shouldIgnore(author)) return;
-            const content = cached?.content;
-            const attachments = cached?.attachments ?? [];
-            if (!content && attachments.length === 0) return;
-
-            sendLog("DELETE", id, content || "", "", author, channelId, attachments);
-
-            if (storage.noDelete && content) {
-                let displayContent = cached.historyContent || content;
-
-                // ANSI Red Background for CURRENT (Deleted) content
-                // If history exists, we have Old(Yellow) + ... + Current
-
-                let finalGhostContent = "";
-
-                if (cached.historyContent) {
-                    // historyContent = [Block][Block]... Current (plain text)
-                    // We want to turn the last Plain Text into Red Background Block
-
-                    // We don't easily know where the last block ends without parsing.
-                    // But wait, `historyContent` INCLUDES the plain text at the end.
-                    // And we stored it.
-
-                    // To avoid parsing mess, we can just say: The "Current" content 
-                    // (which we know is `cached.content` - the clean version)
-                    // should be wrapped in Red.
-
-                    // But `historyContent` is `[Block] clean`.
-                    // So we can strip `clean` from the end of `historyContent` and append `[Red Block]`.
-
-                    // This assumes `historyContent` ends with `content`.
-                    if (displayContent.endsWith(content)) {
-                        const prefix = displayContent.slice(0, -content.length);
-                        finalGhostContent = prefix + toAnsi(content, "DELETE");
-                    } else {
-                        // Fallback
-                        finalGhostContent = displayContent + "\n" + toAnsi("[DELETED]", "DELETE");
-                    }
-
-                } else {
-                    // No history, just wrap the whole thing in Red
-                    finalGhostContent = toAnsi(content, "DELETE");
-                }
-
-                const ghostMsg = {
-                    id: id,
-                    channel_id: channelId,
-                    author: author,
-                    content: finalGhostContent,
-                    timestamp: new Date().toISOString(),
-                    state: "SENT",
-                    __isGhost: true
-                };
-
-                setTimeout(() => {
-                    FluxDispatcher.dispatch({
-                        type: "MESSAGE_CREATE",
-                        channelId: channelId,
-                        message: ghostMsg,
-                        optimistic: true
-                    });
-                }, 100);
-            }
-
-            messageCache.delete(id);
-        } catch (e) { log.error("Delete Error", e); }
-    };
-
-    const onMessageDeleteBulk = (event) => {
-        if (event.ids) event.ids.forEach(id => onMessageDelete({ id, channelId: event.channel_id }));
-    };
-
-    const onMessageCreate = (event) => { if (event.message && !event.message.__isGhost) cacheMessage(event.message); };
-    const onMessagesLoad = (event) => { if (event.messages) event.messages.forEach(cacheMessage); };
-
+    // --- Plugin ---
     return {
         onLoad: () => {
             log.info("Loading V" + VERSION);
@@ -310,20 +162,130 @@
             if (storage.noDelete === undefined) storage.noDelete = true;
             if (storage.editHistory === undefined) storage.editHistory = true;
 
-            FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
-            FluxDispatcher.subscribe("MESSAGE_DELETE", onMessageDelete);
-            FluxDispatcher.subscribe("MESSAGE_DELETE_BULK", onMessageDeleteBulk);
-            FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
-            FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoad);
+            // PATCHER: Intercept Dispatch
+            const unpatch = patcher.before("dispatch", FluxDispatcher, (args) => {
+                const event = args[0];
+                if (!event || !event.type) return;
+
+                // --- CACHING (MESSAGE_CREATE / LOAD) ---
+                if (event.type === "MESSAGE_CREATE") {
+                    if (event.message) cacheMessage(event.message);
+                    return;
+                }
+                if (event.type === "LOAD_MESSAGES_SUCCESS") {
+                    if (event.messages) event.messages.forEach(cacheMessage);
+                    return;
+                }
+
+                // --- DELETE INTERCEPTION ---
+                if (event.type === "MESSAGE_DELETE") {
+                    try {
+                        const { id, channelId } = event;
+                        if (!id) return;
+
+                        const cached = messageCache.get(id);
+                        const author = cached?.author;
+
+                        if (!author || shouldIgnore(author)) return;
+
+                        // 1. Log to Webhook (Async)
+                        const content = cached?.content;
+                        const attachments = cached?.attachments ?? [];
+                        if (content || attachments.length > 0) {
+                            sendLog("DELETE", id, content || "", "", author, channelId, attachments);
+                        }
+
+                        // 2. Prevent Deletion (NoDelete) - Reference: meqativ/dumsane
+                        if (storage.noDelete && content) {
+                            // Transform event to MESSAGE_EDIT_FAILED_AUTOMOD
+                            args[0] = {
+                                type: "MESSAGE_EDIT_FAILED_AUTOMOD", // Trick to show Red Banner?
+                                messageData: {
+                                    type: 1,
+                                    message: {
+                                        channelId: channelId,
+                                        messageId: id,
+                                    }
+                                },
+                                errorResponseBody: {
+                                    code: 200000,
+                                    message: "This message was deleted (UniversalSyncLogger)",
+                                }
+                            };
+                            return args; // Propagate changed event
+                        }
+
+                        messageCache.delete(id);
+                    } catch (e) { log.error("Delete Patch Error", e); }
+                }
+
+                // --- UPDATE INTERCEPTION ---
+                if (event.type === "MESSAGE_UPDATE") {
+                    try {
+                        const { message } = event;
+                        if (!message?.id || !message.content) return;
+
+                        if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
+                        const storeMsg = MessageStore.getMessage(message.channel_id, message.id);
+                        const cached = messageCache.get(message.id);
+
+                        const oldContent = cached?.content ?? storeMsg?.content;
+                        const author = cached?.author ?? storeMsg?.author ?? message.author;
+                        const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
+
+                        if (!author || shouldIgnore(author)) return;
+
+                        if (oldContent !== undefined && oldContent !== message.content) {
+                            // 1. Log (Async)
+                            sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
+
+                            // 2. Edit History (Modify In-Flight)
+                            if (storage.editHistory) {
+                                const prevDisplay = cached?.historyContent || null;
+
+                                // Yellow ANSI for Old Content
+                                const ansiBlock = toAnsi(oldContent, "EDIT"); // Yellow
+
+                                let newDisplay = "";
+                                if (!prevDisplay) {
+                                    newDisplay = `${ansiBlock}${message.content}`;
+                                } else {
+                                    newDisplay = `${prevDisplay}${ansiBlock}${message.content}`;
+                                }
+
+                                // Modify the event payload directly!
+                                event.message.content = newDisplay;
+
+                                // Update Cache with new Structure
+                                messageCache.set(message.id, {
+                                    content: message.content, // Clean? No, we modified it.
+                                    // Wait, if we modify it in store, `message.content` becomes the dirty one.
+                                    // But we need to log CLEAN next time.
+                                    // So we must cache the CLEAN content (passed in originally).
+                                    // But `message.content` is now modified.
+                                    // We need to capture the clean `message.content` BEFORE modifying.
+                                });
+
+                                // Proper Cache Update
+                                updateCacheHistory(message.id, message.content, newDisplay, author, message.channel_id, attachments);
+                            } else {
+                                cacheMessage({ ...storeMsg, ...cached, ...message, author });
+                            }
+                        } else {
+                            // First see / No change
+                            cacheMessage({ ...storeMsg, ...cached, ...message, author });
+                        }
+                    } catch (e) { log.error("Update Patch Error", e); }
+                }
+            });
+
+            patches.push(unpatch);
 
             if (showToast && storage.showLoadToast) showToast(`Sync Logger V${VERSION} Loaded`, 1);
         },
         onUnload: () => {
-            FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
-            FluxDispatcher.unsubscribe("MESSAGE_DELETE", onMessageDelete);
-            FluxDispatcher.unsubscribe("MESSAGE_DELETE_BULK", onMessageDeleteBulk);
-            FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
-            FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoad);
+            patches.forEach(p => p());
+            patches = [];
             messageCache.clear();
             log.info("Unloaded.");
         },
@@ -372,8 +334,8 @@
                 ),
 
                 React.createElement(View, { style: { marginTop: 20 } },
-                    React.createElement(Row, { label: "NoDelete", subLabel: "Red Background (ANSI) for Deleted", control: React.createElement(FormSwitch, { value: noDelete, onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; } }) }),
-                    React.createElement(Row, { label: "Edit History", subLabel: "Yellow Background (ANSI) for Old", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
+                    React.createElement(Row, { label: "NoDelete", subLabel: "Prevent deletion (Native Red)", control: React.createElement(FormSwitch, { value: noDelete, onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; } }) }),
+                    React.createElement(Row, { label: "Edit History", subLabel: "Show Yellow ANSI History", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
                     React.createElement(Row, { label: "Ignore Self", subLabel: "Don't log own messages", control: React.createElement(FormSwitch, { value: ignoreSelf, onValueChange: (v) => { setIgnoreSelf(v); storage.ignoreSelf = v; } }) }),
                     React.createElement(Row, { label: "Ignore Bots", subLabel: "Don't log bot messages", control: React.createElement(FormSwitch, { value: ignoreBots, onValueChange: (v) => { setIgnoreBots(v); storage.ignoreBots = v; } }) }),
                     React.createElement(Row, { label: "Show Load Toast", subLabel: "Startup notification", control: React.createElement(FormSwitch, { value: showLoadToast, onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; } }) })
@@ -402,4 +364,15 @@
             );
         }
     };
+
+    function updateCacheHistory(id, cleanContent, historyContent, author, channelId, attachments) {
+        messageCache.set(id, {
+            content: cleanContent,
+            author: author,
+            channelId: channelId,
+            attachments: attachments,
+            timestamp: new Date(),
+            historyContent: historyContent
+        });
+    }
 })()
