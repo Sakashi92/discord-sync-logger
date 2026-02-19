@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.3.1";
+    const VERSION = "1.4.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -24,6 +24,19 @@
     };
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // ANSI Helper
+    // 41 = Red Background, 43 = Yellow Background, 0 = Reset
+    // 30 = Black Text (good for light backgrounds), 37 = White Text
+    function toAnsi(text, type) {
+        // Wrap content in block
+        // Type: "DELETE" | "EDIT"
+        const bgCode = type === "DELETE" ? "41" : "43"; // 41=Red, 43=Yellow
+        // Force white text on red? or just default?
+        // Let's try standard white/default text on colored BG.
+        // \u001b[0;41m ... \u001b[0m
+        return `\`\`\`ansi\n\u001b[0;${bgCode}m${text}\u001b[0m\n\`\`\``;
+    }
 
     function cacheMessage(msg) {
         if (!msg?.id) return;
@@ -168,18 +181,15 @@
                 if (storage.editHistory) {
                     const prevDisplay = cached?.historyContent || null;
 
-                    // CLEANER STYLING: Quote + Strikethrough + Emoji
-                    // "> ✏️ ~~Old Content~~"
-                    let diffBlock = "";
-                    const sanitizedOld = oldContent.replace(/\n/g, "\n> "); // Quote multilines
+                    // ANSI Yellow Background for OLD content
+                    const ansiBlock = toAnsi(oldContent, "EDIT"); // Yellow
 
+                    let newDisplay = "";
                     if (!prevDisplay) {
-                        diffBlock = `> ✏️ ~~${sanitizedOld}~~\n`;
+                        newDisplay = `${ansiBlock}${message.content}`;
                     } else {
-                        diffBlock = `${prevDisplay}> ✏️ ~~${sanitizedOld}~~\n`;
+                        newDisplay = `${prevDisplay}${ansiBlock}${message.content}`;
                     }
-
-                    const newDisplay = `${diffBlock}${message.content}`;
 
                     setTimeout(() => {
                         FluxDispatcher.dispatch({
@@ -224,46 +234,39 @@
 
             if (storage.noDelete && content) {
                 let displayContent = cached.historyContent || content;
+
+                // ANSI Red Background for CURRENT (Deleted) content
+                // If history exists, we have Old(Yellow) + ... + Current
+
                 let finalGhostContent = "";
 
-                // Remove existing quotes? No, keep history.
-                // Just wrap the "Current" (now deleted) in Strikethrough Quote.
-
                 if (cached.historyContent) {
-                    // historyContent ended with the *clean* content at the bottom.
-                    // We need to find that clean content and wrap it.
-                    // Simpler: Just append a "Deleted" marker?
-                    // User wants to see the content.
+                    // historyContent = [Block][Block]... Current (plain text)
+                    // We want to turn the last Plain Text into Red Background Block
 
-                    // Since we appended `> ` for history, the "current" text has no quote.
-                    // So we can assume the last part is the text.
-                    // Let's just create a new block for simplicity.
+                    // We don't easily know where the last block ends without parsing.
+                    // But wait, `historyContent` INCLUDES the plain text at the end.
+                    // And we stored it.
 
-                    // Actually, if we just want to mark it red/deleted, we can replae the WHOLE thing
-                    // or just the last part.
-                    // Let's replace the last part (current) with Strikethrough Quote.
+                    // To avoid parsing mess, we can just say: The "Current" content 
+                    // (which we know is `cached.content` - the clean version)
+                    // should be wrapped in Red.
 
-                    // Ideally we would know what the "Current" part was.
-                    // cached.content IS the clean current content!
+                    // But `historyContent` is `[Block] clean`.
+                    // So we can strip `clean` from the end of `historyContent` and append `[Red Block]`.
 
-                    const cleanCurrent = cached.content;
-                    const cleanDisplay = `> 🗑️ ~~${cleanCurrent.replace(/\n/g, "\n> ")}~~`;
-
-                    // We need to keep the OLD history blocks (which are already formatted)
-                    // But `historyContent` INCLUDES the clean current at the end.
-                    // So we have to strip it? That's risky.
-
-                    // Let's just create a full history rebuild?
-                    // We stored `historyContent` = `> Old \n Current`.
-                    // We want `> Old \n > Deleted`.
-                    // This is complex string manipulation.
-
-                    // Alternative: Append `[GELÖSCHT]`
-                    finalGhostContent = `${displayContent} \n# 🗑️ [GELÖSCHT]`;
+                    // This assumes `historyContent` ends with `content`.
+                    if (displayContent.endsWith(content)) {
+                        const prefix = displayContent.slice(0, -content.length);
+                        finalGhostContent = prefix + toAnsi(content, "DELETE");
+                    } else {
+                        // Fallback
+                        finalGhostContent = displayContent + "\n" + toAnsi("[DELETED]", "DELETE");
+                    }
 
                 } else {
-                    // No history, just one message.
-                    finalGhostContent = `> 🗑️ ~~${content.replace(/\n/g, "\n> ")}~~`;
+                    // No history, just wrap the whole thing in Red
+                    finalGhostContent = toAnsi(content, "DELETE");
                 }
 
                 const ghostMsg = {
@@ -369,8 +372,8 @@
                 ),
 
                 React.createElement(View, { style: { marginTop: 20 } },
-                    React.createElement(Row, { label: "NoDelete", subLabel: "Quote deleted messages", control: React.createElement(FormSwitch, { value: noDelete, onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; } }) }),
-                    React.createElement(Row, { label: "Edit History", subLabel: "Quote old edits", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
+                    React.createElement(Row, { label: "NoDelete", subLabel: "Red Background (ANSI) for Deleted", control: React.createElement(FormSwitch, { value: noDelete, onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; } }) }),
+                    React.createElement(Row, { label: "Edit History", subLabel: "Yellow Background (ANSI) for Old", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
                     React.createElement(Row, { label: "Ignore Self", subLabel: "Don't log own messages", control: React.createElement(FormSwitch, { value: ignoreSelf, onValueChange: (v) => { setIgnoreSelf(v); storage.ignoreSelf = v; } }) }),
                     React.createElement(Row, { label: "Ignore Bots", subLabel: "Don't log bot messages", control: React.createElement(FormSwitch, { value: ignoreBots, onValueChange: (v) => { setIgnoreBots(v); storage.ignoreBots = v; } }) }),
                     React.createElement(Row, { label: "Show Load Toast", subLabel: "Startup notification", control: React.createElement(FormSwitch, { value: showLoadToast, onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; } }) })
