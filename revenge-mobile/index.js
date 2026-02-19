@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.2.0";
+    const VERSION = "1.3.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -31,18 +31,32 @@
             const firstKey = messageCache.keys().next().value;
             if (firstKey) messageCache.delete(firstKey);
         }
+
+        // Preserve historyContent if it exists in current cache
+        const existing = messageCache.get(msg.id);
+        const historyContent = existing?.historyContent || null;
+
         let attachments = [];
         if (msg.attachments) {
             if (Array.isArray(msg.attachments)) attachments = msg.attachments;
             else if (typeof msg.attachments.values === 'function') attachments = Array.from(msg.attachments.values());
         }
+
         messageCache.set(msg.id, {
             content: msg.content ?? "",
             author: msg.author,
             channelId: msg.channel_id,
             attachments: attachments,
-            timestamp: new Date()
+            timestamp: new Date(),
+            historyContent: historyContent // Persist history
         });
+    }
+
+    function updateCacheHistory(id, newHistoryContent) {
+        const existing = messageCache.get(id);
+        if (existing) {
+            messageCache.set(id, { ...existing, historyContent: newHistoryContent });
+        }
     }
 
     function shouldIgnore(author) {
@@ -68,7 +82,7 @@
             const channelId = chData.channel_id;
             if (!channelId) return false;
 
-            const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages?limit=20`, {
+            const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages?limit=25`, {
                 headers: { "Authorization": token }
             });
             if (!res.ok) return false;
@@ -101,7 +115,6 @@
         const url = storage.webhookUrl;
         if (!url || !url.startsWith("http")) return;
 
-        // Async Delay & Dedupe
         await sleep(2000);
 
         const duplicate = await isDuplicate(url, messageId, type);
@@ -144,9 +157,14 @@
         try {
             const { message } = event;
             if (!message?.id) return;
+            // Prevent Log/Ghost Loop
+            if (message.__isGhost) return;
+
             if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
             const storeMsg = MessageStore.getMessage(message.channel_id, message.id);
             const cached = messageCache.get(message.id);
+
+            // Clean Content Recovery
             const oldContent = cached?.content ?? storeMsg?.content;
             const author = cached?.author ?? storeMsg?.author ?? message.author;
             const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
@@ -154,11 +172,57 @@
             if (!author || shouldIgnore(author)) return;
             if (message.content === undefined) return;
 
-            // Check if it's our ghost message being updated? Unlikely since we don't sync back.
-
             if (oldContent !== undefined && oldContent !== message.content) {
+                // 1. Send Webhook Log (Async)
                 sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
+
+                // 2. Edit History UI (Ghost Update)
+                if (storage.editHistory) {
+                    // Previous Display (Ghost) Content
+                    const prevDisplay = cached?.historyContent || null;
+
+                    // Construct New Block
+                    // If no previous history, oldContent is the Origin
+                    let diffBlock = "";
+                    if (!prevDisplay) {
+                        diffBlock = `\`\`\`diff\n- ${oldContent}\n\`\`\`\n`;
+                    } else {
+                        // We append the new "Old" (which was the current before this edit)
+                        // Actually, if we have history, 'oldContent' IS the previous 'current'.
+                        // So we just diff that.
+                        diffBlock = `${prevDisplay}\`\`\`diff\n- ${oldContent}\n\`\`\`\n`;
+                    }
+
+                    const newDisplay = `${diffBlock}${message.content}`;
+
+                    // Dispatch Ghost Update
+                    setTimeout(() => {
+                        FluxDispatcher.dispatch({
+                            type: "MESSAGE_UPDATE",
+                            message: {
+                                ...message,
+                                content: newDisplay,
+                                __isGhost: true // Marker to ignore next loop
+                            }
+                        });
+                    }, 50);
+
+                    // Update Cache with BOTH Clean and History
+                    // 'message' has the new Clean content (from server event)
+                    // We also save 'newDisplay' as 'historyContent'
+                    messageCache.set(message.id, {
+                        content: message.content, // Clean V3
+                        author,
+                        channelId: message.channel_id,
+                        attachments,
+                        timestamp: new Date(),
+                        historyContent: newDisplay // V1...V2...V3
+                    });
+
+                    return; // Done, cache set manually
+                }
             }
+            // Standard Cache (if not Edit History flow)
             cacheMessage({ ...storeMsg, ...cached, ...message, author });
         } catch (e) { log.error("Update Error", e); }
     };
@@ -167,36 +231,50 @@
         try {
             const { id, channelId } = event;
             if (!id) return;
-            if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
-            // const storeMsg = MessageStore.getMessage(channelId, id); // Don't rely on store, it might be gone
             const cached = messageCache.get(id);
-            const author = cached?.author; // removed storeMsg fallback
+            const author = cached?.author;
 
             if (!author || shouldIgnore(author)) return;
             const content = cached?.content;
             const attachments = cached?.attachments ?? [];
             if (!content && attachments.length === 0) return;
 
-            // 1. Send Log
             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
 
-            // 2. NoDelete (Ghost Message) Resurrection
             if (storage.noDelete && content) {
-                const ghostId = id; // Try reusing ID to simulate persistence
-                const ghostContent = "```diff\n- " + content + "\n```"; // Red Diff Syntax
+                // If we have history content, try to use that?
+                // Actually the user wants to see it red.
+                // If it was valid history: `[Diffs] \n Current`.
+                // We want to make the `Current` red too.
+
+                let displayContent = cached.historyContent || content;
+                // If it was history, the last part is normal text "Current".
+                // We wrap the whole thing? Or just the end?
+                // Wrapping potential existing code blocks in another code block breaks markdown.
+                // Simple approach: Surround *everything* in diff? No.
+
+                // If history exists, it ends with ` \n Current`.
+                // We can replace the last `Current` with ` ```diff - Current ``` `.
+
+                let finalGhostContent = "";
+                if (cached.historyContent) {
+                    // Hacky split?
+                    // Or just display "DELETED" banner?
+                    finalGhostContent = displayContent + "\n```diff\n- [GELÖSCHT]\n```";
+                } else {
+                    finalGhostContent = "```diff\n- " + content + "\n```";
+                }
 
                 const ghostMsg = {
-                    id: ghostId,
+                    id: id,
                     channel_id: channelId,
                     author: author,
-                    content: ghostContent,
-                    timestamp: cached.timestamp ? cached.timestamp.toISOString() : new Date().toISOString(),
+                    content: finalGhostContent,
+                    timestamp: new Date().toISOString(),
                     state: "SENT",
-                    edited_timestamp: new Date().toISOString(),
-                    // Add some flags to maybe prevent it triggering other things?
+                    __isGhost: true
                 };
 
-                // Dispatch CREATE to UI with a small delay to ensure DELETE is processed
                 setTimeout(() => {
                     FluxDispatcher.dispatch({
                         type: "MESSAGE_CREATE",
@@ -216,12 +294,7 @@
     };
 
     const onMessageCreate = (event) => {
-        // Prevent caching our own Ghost Messages if possible?
-        if (event.message) {
-            if (event.message.content && event.message.content.startsWith("```diff\n- ")) {
-                // Likely a ghost message, don't cache it so we don't re-log its deletion
-                return;
-            }
+        if (event.message && !event.message.__isGhost) {
             cacheMessage(event.message);
         }
     };
@@ -238,7 +311,8 @@
             if (storage.ignoreSelf === undefined) storage.ignoreSelf = false;
             if (storage.ignoreBots === undefined) storage.ignoreBots = false;
             if (storage.showLoadToast === undefined) storage.showLoadToast = true;
-            if (storage.noDelete === undefined) storage.noDelete = true; // Default ON requested?
+            if (storage.noDelete === undefined) storage.noDelete = true;
+            if (storage.editHistory === undefined) storage.editHistory = true;
 
             FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
             FluxDispatcher.subscribe("MESSAGE_DELETE", onMessageDelete);
@@ -263,6 +337,7 @@
             const [ignoreBots, setIgnoreBots] = React.useState(storage.ignoreBots ?? false);
             const [showLoadToast, setShowLoadToast] = React.useState(storage.showLoadToast ?? true);
             const [noDelete, setNoDelete] = React.useState(storage.noDelete ?? true);
+            const [editHistory, setEditHistory] = React.useState(storage.editHistory ?? true);
 
             const FormSection = Forms?.FormSection || View;
             const FormInput = Forms?.FormInput || Forms?.TextInput || ui.components?.TextInput || ReactNative.TextInput;
@@ -303,16 +378,24 @@
 
                 React.createElement(View, { style: { marginTop: 20 } },
                     React.createElement(Row, {
-                        label: "NoDelete (Show Deleted)",
-                        subLabel: "Keep deleted messages visible in Red",
+                        label: "NoDelete",
+                        subLabel: "Show deleted messages in red",
                         control: React.createElement(FormSwitch, {
                             value: noDelete,
                             onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; }
                         })
                     }),
                     React.createElement(Row, {
+                        label: "Edit History",
+                        subLabel: "Show old edits above current text",
+                        control: React.createElement(FormSwitch, {
+                            value: editHistory,
+                            onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; }
+                        })
+                    }),
+                    React.createElement(Row, {
                         label: "Ignore Self",
-                        subLabel: "Don't log your own message edits/deletes",
+                        subLabel: "Don't log own messages",
                         control: React.createElement(FormSwitch, {
                             value: ignoreSelf,
                             onValueChange: (v) => { setIgnoreSelf(v); storage.ignoreSelf = v; }
@@ -328,7 +411,7 @@
                     }),
                     React.createElement(Row, {
                         label: "Show Load Toast",
-                        subLabel: "Show startup notification",
+                        subLabel: "Startup notification",
                         control: React.createElement(FormSwitch, {
                             value: showLoadToast,
                             onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; }
@@ -340,7 +423,7 @@
                     React.createElement(SettingsButton, {
                         text: "Verlassen & Speichern",
                         onPress: () => {
-                            if (showToast) showToast("Einstellungen gespeichert", 1);
+                            if (showToast) showToast("Settings saved", 1);
                             navigation?.pop?.();
                         },
                         style: !Button ? { backgroundColor: "#5865f2", padding: 15, borderRadius: 8, alignItems: "center" } : {}
