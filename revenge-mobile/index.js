@@ -7,11 +7,12 @@
     const { storage } = plugin;
 
     // Try to get Discord's own components (safer for keyboard handling)
-    const { TextInput, FormSwitch } = ui.components;
+    // Make sure to access them safely
+    const Components = ui.components || {};
+    const { TextInput, FormSwitch } = Components;
+
     // Fallbacks to RN if missing
     const RN = ReactNative;
-
-    // Use RN View/Text for layout as they are safe
     const { View, Text, ScrollView } = RN;
 
     // --- Constants ---
@@ -202,6 +203,18 @@
             const InputComponent = TextInput || RN.TextInput;
             const SwitchComponent = FormSwitch || RN.Switch;
 
+            const handleTextChange = (val) => {
+                let text = val;
+                // Handle Event object if Discord passes that
+                if (val && typeof val === "object" && val.nativeEvent) {
+                    text = val.nativeEvent.text;
+                }
+                if (typeof text !== "string") return;
+
+                setWebhookUrl(text);
+                storage.webhookUrl = text;
+            };
+
             return React.createElement(ScrollView, { style: { flex: 1 } },
                 React.createElement(View, { style: { padding: 15 } },
                     React.createElement(Text, { style: { color: "#ffffff", marginBottom: 8, fontWeight: "bold" } }, "Webhook URL"),
@@ -209,20 +222,20 @@
                         value: webhookUrl,
                         placeholder: "https://discord.com/api/webhooks/...",
                         placeholderTextColor: "#72767d",
-                        // Discord TextInput uses 'onChange' with 'nativeEvent.text' usually? 
-                        // Or just normal props. 
-                        // Safe approach: handle both onChangeText and onChange
-                        onChangeText: (val) => {
-                            setWebhookUrl(val);
-                            storage.webhookUrl = val;
-                        },
+                        onChangeText: handleTextChange, // RN standard
+                        onChange: handleTextChange, // Discord/Web standard
                         style: !TextInput ? {
                             backgroundColor: "#202225",
                             color: "#ffffff",
                             padding: 10,
-                            borderRadius: 4
-                        } : undefined // Discord TI usually has its own styles
-                    })
+                            borderRadius: 4,
+                            marginBottom: 5
+                        } : undefined
+                    }),
+                    // Fallback Text to show current value
+                    React.createElement(Text, { style: { color: "#72767d", fontSize: 10 } },
+                        webhookUrl ? "Current: " + webhookUrl.substring(0, 40) + "..." : "No URL set"
+                    )
                 ),
                 React.createElement(Row, {
                     label: "Ignore Self",
