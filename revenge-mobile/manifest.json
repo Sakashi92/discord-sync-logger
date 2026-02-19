@@ -8,6 +8,7 @@
         }
     ],
     "main": "index.js",
+    "hash": "123456",
     "vendetta": {
         "icon": "ic_sync_24px"
     }
