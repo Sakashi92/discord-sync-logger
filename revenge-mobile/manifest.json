@@ -1,0 +1,8 @@
+{
+    "name": "UltimateEditLogger",
+    "description": "Loggt Edits/Löschungen in Webhook und stellt sie im Chat wieder her.",
+    "version": "0.0.1",
+    "author": "Sakashi",
+    "main": "index.js",
+    "category": "Utility"
+}
