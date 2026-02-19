@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.7.0";
+    const VERSION = "1.8.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -12,11 +12,13 @@
     const { Forms, Button } = ui.components || {};
     const { showToast } = ui.toasts || {};
 
-    // Runtime Cache (for dedupe logic etc)
     const messageCache = new Map();
     let MessageStore = metro.findByStoreName("MessageStore");
     let UserStore = metro.findByStoreName("UserStore");
     let patches = [];
+
+    // Cache for Webhook Channel ID to avoid fetching it every time
+    let cachedLogChannelId = null;
 
     const log = {
         info: (...args) => logger.info(`${LOG_PREFIX}:`, ...args),
@@ -30,7 +32,6 @@
         return `\`\`\`ansi\n\u001b[0;${bgCode}m${text}\u001b[0m\n\`\`\``;
     }
 
-    // --- Persistence Helper ---
     function saveHistory(id, historyContent) {
         if (!storage.history) storage.history = {};
         storage.history[id] = historyContent;
@@ -46,12 +47,8 @@
         if (!storage.history) return;
         const keys = Object.keys(storage.history);
         if (keys.length > 500) {
-            // Sort by ID (Snowflake) - ascending (oldest first)
-            // String comparison works for snowflakes of same length, but safe BigInt compare is better.
-            // Simplified: String sort is "okay" for recent years. 
-            // We strip the oldest ~50.
             keys.sort();
-            const toRemove = keys.slice(0, keys.length - 450); // Keep 450
+            const toRemove = keys.slice(0, keys.length - 450);
             toRemove.forEach(k => delete storage.history[k]);
         }
     }
@@ -63,8 +60,7 @@
             if (firstKey) messageCache.delete(firstKey);
         }
 
-        // Try get history from Storage first, then Memory
-        const historyContent = getHistory(msg.id); // Persistent
+        const historyContent = getHistory(msg.id);
 
         let attachments = [];
         if (msg.attachments) {
@@ -94,55 +90,148 @@
         return false;
     }
 
-    async function isDuplicate(webhookUrl, messageId, type) {
+    // --- Webhook / Remote Logic ---
+
+    async function getLogChannelId(webhookUrl) {
+        if (cachedLogChannelId) return cachedLogChannelId;
+        try {
+            const chRes = await fetch(webhookUrl.split("?")[0]);
+            if (chRes.ok) {
+                const chData = await chRes.json();
+                if (chData.channel_id) {
+                    cachedLogChannelId = chData.channel_id;
+                    return cachedLogChannelId;
+                }
+            }
+        } catch (e) { log.error("Failed to resolve webhook channel", e); }
+        return null;
+    }
+
+    async function restoreFromWebhook(targetMessageIds) {
+        if (!storage.webhookUrl || !targetMessageIds || targetMessageIds.length === 0) return;
+
         try {
             const TokenModule = metro.findByProps("getToken", "isTokenRequired");
             const token = TokenModule?.getToken?.();
-            if (!token) return false;
+            if (!token) return;
 
-            const chRes = await fetch(webhookUrl.split("?")[0]);
-            if (!chRes.ok) return false;
-            const chData = await chRes.json();
-            const channelId = chData.channel_id;
-            if (!channelId) return false;
+            const channelId = await getLogChannelId(storage.webhookUrl);
+            if (!channelId) return;
 
-            const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages?limit=25`, {
+            // Fetch recent logs (Limit 50 should cover recent context)
+            const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages?limit=50`, {
                 headers: { "Authorization": token }
             });
-            if (!res.ok) return false;
-            const messages = await res.json();
-            if (!Array.isArray(messages)) return false;
 
-            for (const msg of messages) {
-                if (!msg.embeds?.length) continue;
-                for (const embed of msg.embeds) {
+            if (!res.ok) return;
+            const logs = await res.json();
+            if (!Array.isArray(logs)) return;
+
+            // Map: TargetMsgID -> Array of { oldContent, time }
+            const restoredData = new Map();
+
+            for (const logMsg of logs) {
+                if (!logMsg.embeds) continue;
+                for (const embed of logMsg.embeds) {
                     const footer = embed.footer?.text;
                     if (!footer || !footer.includes("id:")) continue;
 
                     const idMatch = footer.match(/id:\s*(\d+)/);
                     if (!idMatch) continue;
-
                     const logMsgId = idMatch[1];
-                    const isEdit = embed.title?.includes("✏️");
-                    const isDelete = embed.title?.includes("🗑️");
-                    const logType = isEdit ? "EDIT" : (isDelete ? "DELETE" : null);
 
-                    if (logMsgId === messageId && logType === type) {
-                        return true;
+                    // Check if this log belongs to a message we allow currently viewing
+                    if (!targetMessageIds.includes(logMsgId)) continue;
+
+                    // Check if it is an EDIT log
+                    const isEdit = embed.title?.includes("✏️");
+                    if (!isEdit) continue;
+
+                    // Extract Old Content
+                    // "Vorher" field
+                    const prevField = embed.fields?.find(f => f.name === "Vorher");
+                    if (prevField) {
+                        const content = prevField.value;
+                        const timestamp = logMsg.timestamp; // ISO string from log message
+                        const timeStr = moment(timestamp).format("HH:mm:ss");
+
+                        if (!restoredData.has(logMsgId)) restoredData.set(logMsgId, []);
+                        restoredData.get(logMsgId).push({ content, timeStr, timestamp });
                     }
                 }
             }
-        } catch (e) {
-            log.error("Dedupe check failed", e);
-        }
-        return false;
+
+            // Apply restoration
+            for (const [msgId, edits] of restoredData) {
+                // Sort edits by time (oldest first)
+                edits.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+                // Reconstruct ANSI History
+                let combinedHistory = "";
+                edits.forEach(e => {
+                    // Check if this content is already in local history to avoid dupes?
+                    // Hard to check string exact match without parsing ANSI.
+                    // Simple heuristic: if local history is empty, restore full.
+                    // If local history exists, assume it's accurate and skip? 
+                    // Or try to merge?
+                    // Risk of duplication.
+                    // User asked to restore "if webhook is specified".
+                    // Best approach: "Backfill".
+
+                    const block = `${e.content}\n[${e.timeStr}]`;
+                    combinedHistory += toAnsi(block, "EDIT");
+                });
+
+                const currentLocal = getHistory(msgId);
+                // Only update if local is empty or significantly smaller?
+                // Or if we trust remote more?
+                // Let's assume if local is empty, we restore.
+
+                if (!currentLocal && combinedHistory) {
+                    saveHistory(msgId, combinedHistory);
+
+                    // Dispatch update to UI to make it appear immediately
+                    if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
+                    // We need channelId
+                    const cached = messageCache.get(msgId);
+                    if (cached) {
+                        const msg = MessageStore.getMessage(cached.channelId, msgId);
+                        if (msg) {
+                            // Inject embed
+                            const historyEmbed = {
+                                type: "rich",
+                                description: combinedHistory,
+                                color: 0xFEE75C
+                            };
+
+                            const cleanEmbeds = (msg.embeds || []).filter(e => e.color !== 0xFEE75C);
+                            const newEmbeds = [...cleanEmbeds, historyEmbed];
+
+                            FluxDispatcher.dispatch({
+                                type: "MESSAGE_UPDATE",
+                                message: {
+                                    ...msg,
+                                    embeds: newEmbeds,
+                                    __isGhost: true // Don't re-log this update!
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+
+        } catch (e) { log.error("Restoration failed", e); }
     }
 
     async function sendLog(type, messageId, oldContent, newContent, author, channelId, attachments = []) {
         const url = storage.webhookUrl;
         if (!url || !url.startsWith("http")) return;
 
-        await sleep(2000);
+        await sleep(2000); // Wait for potential deletion event
+
+        // Check cache to see if we should skip logging (e.g. if we just deduped it)
+        // isDuplicate calls fetch which is slow.
+        // We can optimize next time.
 
         const duplicate = await isDuplicate(url, messageId, type);
         if (duplicate) {
@@ -189,39 +278,38 @@
             if (storage.showLoadToast === undefined) storage.showLoadToast = true;
             if (storage.noDelete === undefined) storage.noDelete = true;
             if (storage.editHistory === undefined) storage.editHistory = true;
-            if (storage.history === undefined) storage.history = {}; // Init Storage
+            if (storage.history === undefined) storage.history = {};
 
             const unpatch = patcher.before("dispatch", FluxDispatcher, (args) => {
                 const event = args[0];
                 if (!event || !event.type) return;
 
-                // --- PERSISTENCE: INJECT HISTORY ON LOAD ---
                 if (event.type === "LOAD_MESSAGES_SUCCESS") {
-                    if (storage.editHistory && event.messages && Array.isArray(event.messages)) {
-                        event.messages.forEach(msg => {
-                            const savedHistory = getHistory(msg.id);
-                            if (savedHistory) {
-                                // Inject Embed
-                                if (!msg.embeds) msg.embeds = [];
+                    if (event.messages && Array.isArray(event.messages)) {
+                        // 1. Restore Local
+                        if (storage.editHistory) {
+                            event.messages.forEach(msg => {
+                                const savedHistory = getHistory(msg.id);
+                                if (savedHistory) {
+                                    if (!msg.embeds) msg.embeds = [];
+                                    const cleanEmbeds = msg.embeds.filter(e => e.color !== 0xFEE75C);
+                                    msg.embeds = [...cleanEmbeds, {
+                                        type: "rich",
+                                        description: savedHistory,
+                                        color: 0xFEE75C
+                                    }];
+                                }
+                                cacheMessage(msg);
+                            });
+                        } else {
+                            event.messages.forEach(cacheMessage);
+                        }
 
-                                // Check (weakly) if we already have it to be safe
-                                // But LOAD happens once usually per fetch.
-
-                                const historyEmbed = {
-                                    type: "rich",
-                                    description: savedHistory,
-                                    color: 0xFEE75C // Yellow
-                                };
-
-                                // Append
-                                // Filter existing yellow embeds to avoid dupe on re-fetch?
-                                const cleanEmbeds = msg.embeds.filter(e => e.color !== 0xFEE75C);
-                                msg.embeds = [...cleanEmbeds, historyEmbed];
-                            }
-                            cacheMessage(msg);
-                        });
-                    } else if (event.messages) {
-                        event.messages.forEach(cacheMessage);
+                        // 2. Restore Remote (Async Backfill)
+                        if (storage.webhookUrl) {
+                            const ids = event.messages.map(m => m.id);
+                            restoreFromWebhook(ids);
+                        }
                     }
                     return;
                 }
@@ -231,7 +319,6 @@
                     return;
                 }
 
-                // --- DELETE INTERCEPTION ---
                 if (event.type === "MESSAGE_DELETE") {
                     try {
                         const { id, channelId } = event;
@@ -250,7 +337,7 @@
 
                         if (storage.noDelete && content) {
                             args[0] = {
-                                type: "MESSAGE_EDIT_FAILED_AUTOMOD", // Red Native Background
+                                type: "MESSAGE_EDIT_FAILED_AUTOMOD",
                                 messageData: {
                                     type: 1,
                                     message: {
@@ -270,11 +357,11 @@
                     } catch (e) { log.error("Delete Patch Error", e); }
                 }
 
-                // --- UPDATE INTERCEPTION ---
                 if (event.type === "MESSAGE_UPDATE") {
                     try {
                         const { message } = event;
                         if (!message?.id || !message.content) return;
+                        if (message.__isGhost) return; // Ignore our own updates
 
                         if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
                         const storeMsg = MessageStore.getMessage(message.channel_id, message.id);
@@ -290,7 +377,6 @@
                             sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
 
                             if (storage.editHistory) {
-                                // Load saved history from storage if missing in cache (re-hydration)
                                 const prevHistory = cached?.historyContent || getHistory(message.id) || "";
 
                                 const timeStr = moment().format("HH:mm:ss");
@@ -300,20 +386,17 @@
                                 const newHistory = prevHistory + ansiBlock;
 
                                 let embeds = message.embeds ? [...message.embeds] : [];
-
+                                const cleanEmbeds = embeds.filter(e => e.color !== 0xFEE75C);
                                 const historyEmbed = {
                                     type: "rich",
                                     description: newHistory,
                                     color: 0xFEE75C
                                 };
 
-                                const cleanEmbeds = embeds.filter(e => e.color !== 0xFEE75C);
                                 event.message.embeds = [...cleanEmbeds, historyEmbed];
 
-                                // Save to Persistence
                                 saveHistory(message.id, newHistory);
 
-                                // Update Runtime Cache
                                 messageCache.set(message.id, {
                                     content: message.content,
                                     author: author,
