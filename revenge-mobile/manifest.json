@@ -1,8 +1,14 @@
 {
-    "name": "UltimateEditLogger",
-    "description": "Loggt Edits/Löschungen in Webhook und stellt sie im Chat wieder her.",
-    "version": "0.0.1",
-    "author": "Sakashi",
+    "name": "UniversalSyncLogger",
+    "description": "Logs Message Edits and Deletes",
+    "authors": [
+        {
+            "name": "Sakashi",
+            "id": "755005704193638531"
+        }
+    ],
     "main": "index.js",
-    "category": "Utility"
+    "vendetta": {
+        "icon": "ic_sync_24px"
+    }
 }
