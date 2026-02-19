@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.0.8";
+    const VERSION = "1.0.9";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -62,7 +62,7 @@
         const userField = author ? `${author.username}#${author.discriminator || '0000'}` : "Unbekannt";
 
         const embed = {
-            title: type === "EDIT" ? `📱 ✏️ Bearbeitet (V${VERSION})` : `📱 🗑️ Gelöscht (V${VERSION})`,
+            title: type === "EDIT" ? `📱 ✏️ Bearbeitet (Mobile)` : `📱 🗑️ Gelöscht (Mobile)`,
             color: type === "EDIT" ? 16753920 : 15158332,
             fields: [
                 { name: "User", value: userField, inline: true },
@@ -97,6 +97,7 @@
             const oldContent = cached?.content ?? storeMsg?.content;
             const author = cached?.author ?? storeMsg?.author ?? message.author;
             const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
+
             if (!author || shouldIgnore(author)) return;
             if (message.content === undefined) return;
             if (oldContent !== undefined && oldContent !== message.content) {
@@ -118,6 +119,7 @@
             const content = cached?.content ?? storeMsg?.content;
             const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
             if (!content && attachments.length === 0) return;
+
             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
             messageCache.delete(id);
         } catch (e) { log.error("Delete Error", e); }
@@ -142,6 +144,7 @@
             if (storage.webhookUrl === undefined) storage.webhookUrl = "";
             if (storage.ignoreSelf === undefined) storage.ignoreSelf = false;
             if (storage.ignoreBots === undefined) storage.ignoreBots = false;
+            if (storage.showLoadToast === undefined) storage.showLoadToast = true;
 
             FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
             FluxDispatcher.subscribe("MESSAGE_DELETE", onMessageDelete);
@@ -149,7 +152,7 @@
             FluxDispatcher.subscribe("MESSAGE_CREATE", onMessageCreate);
             FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoad);
 
-            if (showToast) showToast(`Sync Logger V${VERSION} Loaded`, 1);
+            if (showToast && storage.showLoadToast) showToast(`Sync Logger V${VERSION} Loaded`, 1);
         },
         onUnload: () => {
             FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
@@ -164,6 +167,7 @@
             const [webhookUrl, setWebhookUrl] = React.useState(storage.webhookUrl ?? "");
             const [ignoreSelf, setIgnoreSelf] = React.useState(storage.ignoreSelf ?? false);
             const [ignoreBots, setIgnoreBots] = React.useState(storage.ignoreBots ?? false);
+            const [showLoadToast, setShowLoadToast] = React.useState(storage.showLoadToast ?? true);
 
             const FormSection = Forms?.FormSection || View;
             const FormInput = Forms?.FormInput || Forms?.TextInput || ui.components?.TextInput || ReactNative.TextInput;
@@ -218,15 +222,23 @@
                             value: ignoreBots,
                             onValueChange: (v) => { setIgnoreBots(v); storage.ignoreBots = v; }
                         })
+                    }),
+                    React.createElement(Row, {
+                        label: "Show Load Toast",
+                        subLabel: "Show startup notification",
+                        control: React.createElement(FormSwitch, {
+                            value: showLoadToast,
+                            onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; }
+                        })
                     })
                 ),
 
                 React.createElement(View, { style: { marginTop: 30, marginBottom: 50 } },
                     React.createElement(SettingsButton, {
-                        text: "Verlassen & Speichern", // Standard Button Prop
+                        text: "Verlassen & Speichern",
                         onPress: () => {
                             if (showToast) showToast("Einstellungen gespeichert", 1);
-                            navigation?.pop?.(); // Try to close settings
+                            navigation?.pop?.();
                         },
                         style: !Button ? { backgroundColor: "#5865f2", padding: 15, borderRadius: 8, alignItems: "center" } : {}
                     }, !Button ? React.createElement(Text, { style: { color: "white", fontWeight: "bold" } }, "OK / Speichern") : null),
@@ -240,10 +252,7 @@
                         }
                     }, React.createElement(Text, { style: { color: "#5865f2", fontSize: 13 } }, "Test-Log senden"))
                 ),
-
-                React.createElement(Text, { style: { color: "#4f545c", textAlign: "center", fontSize: 11 } },
-                    `UniversalSyncLogger V${VERSION}\nRevenge Mobile Port`
-                )
+                React.createElement(Text, { style: { color: "#4f545c", textAlign: "center", fontSize: 11 } }, `V${VERSION}`)
             );
         }
     };
