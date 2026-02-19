@@ -3,12 +3,16 @@
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
     const { metro, logger, plugin, ui } = api;
     const { common } = metro;
-    const { FluxDispatcher, React, ReactNative, clipboard } = common;
+    const { FluxDispatcher, React, ReactNative } = common;
     const { storage } = plugin;
 
-    // Use raw RN components
-    const { View, Text, Switch, ScrollView, TouchableOpacity } = ReactNative;
-    const { showToast } = ui.toasts;
+    // Try to get Discord's own components (safer for keyboard handling)
+    const { TextInput, FormSwitch } = ui.components;
+    // Fallbacks to RN if missing
+    const RN = ReactNative;
+
+    // Use RN View/Text for layout as they are safe
+    const { View, Text, ScrollView } = RN;
 
     // --- Constants ---
     const LOG_PREFIX = "UniversalSyncLogger";
@@ -185,56 +189,45 @@
             const [ignoreBots, setIgnoreBots] = React.useState(storage.ignoreBots ?? false);
 
             const Row = ({ label, subLabel, control }) => (
-                React.createElement(View, { style: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 15, borderBottomWidth: 1, borderBottomColor: "#333" } },
+                React.createElement(View, { style: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 15, borderBottomWidth: 1, borderBottomColor: "#333333" } },
                     React.createElement(View, { style: { flex: 1, marginRight: 10 } },
-                        React.createElement(Text, { style: { color: "white", fontSize: 16, fontWeight: "bold" } }, label),
-                        subLabel && React.createElement(Text, { style: { color: "#aaa", fontSize: 12 } }, subLabel)
+                        React.createElement(Text, { style: { color: "#ffffff", fontSize: 16, fontWeight: "bold" } }, label),
+                        subLabel && React.createElement(Text, { style: { color: "#b9bbbe", fontSize: 12 } }, subLabel)
                     ),
                     control
                 )
             );
 
-            // Button style helper
-            const btnStyle = { backgroundColor: "#5865F2", padding: 10, borderRadius: 5, alignItems: "center", marginVertical: 5 };
+            // Use Discord's TextInput if available, else RN
+            const InputComponent = TextInput || RN.TextInput;
+            const SwitchComponent = FormSwitch || RN.Switch;
 
-            return React.createElement(ScrollView, { style: { flex: 1, backgroundColor: "transparent" } },
-                // Webhook URL Section with Paste Button
-                React.createElement(View, { style: { padding: 15, borderBottomWidth: 1, borderBottomColor: "#333" } },
-                    React.createElement(Text, { style: { color: "white", fontSize: 16, fontWeight: "bold", marginBottom: 5 } }, "Webhook URL"),
-                    React.createElement(Text, { style: { color: "#ccc", fontSize: 12, marginBottom: 10, fontFamily: "monospace" } },
-                        webhookUrl ? (webhookUrl.substring(0, 30) + "...") : "Not Set"
-                    ),
-                    React.createElement(TouchableOpacity, {
-                        style: btnStyle,
-                        onPress: async () => {
-                            try {
-                                const content = await clipboard.getString();
-                                if (content && content.startsWith("http")) {
-                                    setWebhookUrl(content);
-                                    storage.webhookUrl = content;
-                                    showToast("Paste successful!", 1); // Success
-                                } else {
-                                    showToast("Clipboard does not contain a URL", 0); // Error?
-                                }
-                            } catch (e) {
-                                showToast("Paste failed", 0);
-                            }
-                        }
-                    }, React.createElement(Text, { style: { color: "white", fontWeight: "bold" } }, "Paste from Clipboard")),
-                    React.createElement(TouchableOpacity, {
-                        style: { ...btnStyle, backgroundColor: "#ED4245" },
-                        onPress: () => {
-                            setWebhookUrl("");
-                            storage.webhookUrl = "";
-                            showToast("URL cleared", 1);
-                        }
-                    }, React.createElement(Text, { style: { color: "white", fontWeight: "bold" } }, "Clear URL"))
+            return React.createElement(ScrollView, { style: { flex: 1 } },
+                React.createElement(View, { style: { padding: 15 } },
+                    React.createElement(Text, { style: { color: "#ffffff", marginBottom: 8, fontWeight: "bold" } }, "Webhook URL"),
+                    React.createElement(InputComponent, {
+                        value: webhookUrl,
+                        placeholder: "https://discord.com/api/webhooks/...",
+                        placeholderTextColor: "#72767d",
+                        // Discord TextInput uses 'onChange' with 'nativeEvent.text' usually? 
+                        // Or just normal props. 
+                        // Safe approach: handle both onChangeText and onChange
+                        onChangeText: (val) => {
+                            setWebhookUrl(val);
+                            storage.webhookUrl = val;
+                        },
+                        style: !TextInput ? {
+                            backgroundColor: "#202225",
+                            color: "#ffffff",
+                            padding: 10,
+                            borderRadius: 4
+                        } : undefined // Discord TI usually has its own styles
+                    })
                 ),
-
                 React.createElement(Row, {
                     label: "Ignore Self",
                     subLabel: "Don't log your own edits/deletes",
-                    control: React.createElement(Switch, {
+                    control: React.createElement(SwitchComponent, {
                         value: ignoreSelf,
                         onValueChange: (val) => {
                             setIgnoreSelf(val);
@@ -245,7 +238,7 @@
                 React.createElement(Row, {
                     label: "Ignore Bots",
                     subLabel: "Don't log bot edits/deletes",
-                    control: React.createElement(Switch, {
+                    control: React.createElement(SwitchComponent, {
                         value: ignoreBots,
                         onValueChange: (val) => {
                             setIgnoreBots(val);
