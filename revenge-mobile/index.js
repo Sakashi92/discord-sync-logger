@@ -1,24 +1,22 @@
 (function () {
-    const VERSION = "1.5.1";
+    const VERSION = "1.6.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
-    const { metro, logger, plugin, ui, utils, patcher } = api; // Added patcher
+    const { metro, logger, plugin, ui, utils, patcher } = api;
     const { common } = metro;
-    const { FluxDispatcher, React, ReactNative, moment } = common; // Added moment if available? commonly is.
+    const { FluxDispatcher, React, ReactNative, moment } = common;
     const { storage } = plugin;
 
     const { View, Text, ScrollView, TouchableOpacity } = ReactNative;
     const { Forms, Button } = ui.components || {};
     const { showToast } = ui.toasts || {};
 
-    // --- State ---
     const messageCache = new Map();
     let MessageStore = metro.findByStoreName("MessageStore");
     let UserStore = metro.findByStoreName("UserStore");
     let patches = [];
 
-    // Helpers
     const log = {
         info: (...args) => logger.info(`${LOG_PREFIX}:`, ...args),
         error: (...args) => logger.error(`${LOG_PREFIX}:`, ...args),
@@ -26,7 +24,6 @@
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // ANSI Helper (Yellow Background=43, Red=41)
     function toAnsi(text, type) {
         const bgCode = type === "DELETE" ? "41" : "43";
         return `\`\`\`ansi\n\u001b[0;${bgCode}m${text}\u001b[0m\n\`\`\``;
@@ -40,7 +37,7 @@
         }
 
         const existing = messageCache.get(msg.id);
-        const historyContent = existing?.historyContent || null; // Preserve
+        const historyContent = existing?.historyContent || null;
 
         let attachments = [];
         if (msg.attachments) {
@@ -48,8 +45,15 @@
             else if (typeof msg.attachments.values === 'function') attachments = Array.from(msg.attachments.values());
         }
 
+        // We want to cache the CLEAN content.
+        let cleanContent = msg.content ?? "";
+
+        // If the message is coming from a Store update that ALREADY has our artifacts, we might be caching dirty data?
+        // But with this V1.6.0 approach, we don't put artifacts in content. 
+        // So msg.content should be clean (unless another plugin dirtied it).
+
         messageCache.set(msg.id, {
-            content: msg.content ?? "",
+            content: cleanContent,
             author: msg.author,
             channelId: msg.channel_id,
             attachments: attachments,
@@ -68,7 +72,6 @@
         return false;
     }
 
-    // --- Deduplication Logic ---
     async function isDuplicate(webhookUrl, messageId, type) {
         try {
             const TokenModule = metro.findByProps("getToken", "isTokenRequired");
@@ -94,7 +97,6 @@
                     const footer = embed.footer?.text;
                     if (!footer || !footer.includes("id:")) continue;
 
-                    // Regex to extract ID regardless of terminator (| or • or space)
                     const idMatch = footer.match(/id:\s*(\d+)/);
                     if (!idMatch) continue;
 
@@ -166,12 +168,10 @@
             if (storage.noDelete === undefined) storage.noDelete = true;
             if (storage.editHistory === undefined) storage.editHistory = true;
 
-            // PATCHER: Intercept Dispatch
             const unpatch = patcher.before("dispatch", FluxDispatcher, (args) => {
                 const event = args[0];
                 if (!event || !event.type) return;
 
-                // --- CACHING (MESSAGE_CREATE / LOAD) ---
                 if (event.type === "MESSAGE_CREATE") {
                     if (event.message) cacheMessage(event.message);
                     return;
@@ -192,18 +192,15 @@
 
                         if (!author || shouldIgnore(author)) return;
 
-                        // 1. Log to Webhook (Async)
                         const content = cached?.content;
                         const attachments = cached?.attachments ?? [];
                         if (content || attachments.length > 0) {
                             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
                         }
 
-                        // 2. Prevent Deletion (NoDelete) - Reference: meqativ/dumsane
                         if (storage.noDelete && content) {
-                            // Transform event to MESSAGE_EDIT_FAILED_AUTOMOD
                             args[0] = {
-                                type: "MESSAGE_EDIT_FAILED_AUTOMOD", // Trick to show Red Banner?
+                                type: "MESSAGE_EDIT_FAILED_AUTOMOD", // Red Native Background
                                 messageData: {
                                     type: 1,
                                     message: {
@@ -216,7 +213,7 @@
                                     message: "This message was deleted (UniversalSyncLogger)",
                                 }
                             };
-                            return args; // Propagate changed event
+                            return args;
                         }
 
                         messageCache.delete(id);
@@ -240,43 +237,54 @@
                         if (!author || shouldIgnore(author)) return;
 
                         if (oldContent !== undefined && oldContent !== message.content) {
-                            // 1. Log (Async)
                             sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
 
-                            // 2. Edit History (Modify In-Flight)
                             if (storage.editHistory) {
-                                const prevDisplay = cached?.historyContent || null;
+                                const prevHistory = cached?.historyContent || "";
 
-                                // Yellow ANSI for Old Content
+                                // Create new History Block
                                 const ansiBlock = toAnsi(oldContent, "EDIT"); // Yellow
+                                const newHistory = prevHistory + ansiBlock;
 
-                                let newDisplay = "";
-                                if (!prevDisplay) {
-                                    newDisplay = `${ansiBlock}${message.content}`;
-                                } else {
-                                    newDisplay = `${prevDisplay}${ansiBlock}${message.content}`;
-                                }
+                                // Modifying Embeds instead of Content
+                                let embeds = message.embeds ? [...message.embeds] : [];
 
-                                // Modify the event payload directly!
-                                event.message.content = newDisplay;
+                                // Remove our own previous history embed if it exists?
+                                // To identify our embed, we could check description or color.
+                                // Or we just append. Just appending is safer to not delete real embeds.
+                                // But eventually we will have duplicates.
+                                // Ideally, we merge.
 
-                                // Update Cache with new Structure
-                                messageCache.set(message.id, {
-                                    content: message.content, // Clean? No, we modified it.
-                                    // Wait, if we modify it in store, `message.content` becomes the dirty one.
-                                    // But we need to log CLEAN next time.
-                                    // So we must cache the CLEAN content (passed in originally).
-                                    // But `message.content` is now modified.
-                                    // We need to capture the clean `message.content` BEFORE modifying.
-                                });
+                                // Simpler: Create a History Embed
+                                // This won't work perfectly if there are multiple listeners, but for now:
+                                const historyEmbed = {
+                                    type: "rich",
+                                    description: newHistory,
+                                    color: 0xFEE75C // Yellow
+                                };
 
-                                // Proper Cache Update
-                                updateCacheHistory(message.id, message.content, newDisplay, author, message.channel_id, attachments);
+                                // We should probably filter out previous history embeds?
+                                // That requires tagging.
+                                // Let's simplify: Just append. 
+                                // The user will see multiple yellow blocks if edited multiple times.
+                                // Actually, `prevHistory` accumulates ALL previous edits.
+                                // So we only display ONE history embed with ALL history.
+                                // We need to remove the OLD history embed.
+
+                                // Filter existing embeds (assuming users don't use Yellow embeds with ANSI often)
+                                // This is weak heuristics but functional for personal use.
+                                const cleanEmbeds = embeds.filter(e => e.color !== 0xFEE75C);
+
+                                event.message.embeds = [...cleanEmbeds, historyEmbed];
+
+                                // Content remains CLEAN (just the new text)
+                                // event.message.content = message.content; // Already set
+
+                                updateCacheHistory(message.id, message.content, newHistory, author, message.channel_id, attachments);
                             } else {
                                 cacheMessage({ ...storeMsg, ...cached, ...message, author });
                             }
                         } else {
-                            // First see / No change
                             cacheMessage({ ...storeMsg, ...cached, ...message, author });
                         }
                     } catch (e) { log.error("Update Patch Error", e); }
@@ -339,7 +347,7 @@
 
                 React.createElement(View, { style: { marginTop: 20 } },
                     React.createElement(Row, { label: "NoDelete", subLabel: "Prevent deletion (Native Red)", control: React.createElement(FormSwitch, { value: noDelete, onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; } }) }),
-                    React.createElement(Row, { label: "Edit History", subLabel: "Show Yellow ANSI History", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
+                    React.createElement(Row, { label: "Edit History", subLabel: "Show Yellow ANSI History (Below)", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
                     React.createElement(Row, { label: "Ignore Self", subLabel: "Don't log own messages", control: React.createElement(FormSwitch, { value: ignoreSelf, onValueChange: (v) => { setIgnoreSelf(v); storage.ignoreSelf = v; } }) }),
                     React.createElement(Row, { label: "Ignore Bots", subLabel: "Don't log bot messages", control: React.createElement(FormSwitch, { value: ignoreBots, onValueChange: (v) => { setIgnoreBots(v); storage.ignoreBots = v; } }) }),
                     React.createElement(Row, { label: "Show Load Toast", subLabel: "Startup notification", control: React.createElement(FormSwitch, { value: showLoadToast, onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; } }) })
