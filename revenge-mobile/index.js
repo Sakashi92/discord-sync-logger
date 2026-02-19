@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.4.0";
+    const VERSION = "1.4.1";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -130,7 +130,7 @@
 
         const attachmentLinks = attachments.map(a => a.url || a.proxy_url).join("\n") || "";
         const attachmentText = attachmentLinks ? `\n\n**📎 Anhänge:**\n${attachmentLinks}` : "";
-        const userField = author ? `${author.username}#${author.discriminator || '0000'}` : "Unbekannt";
+        const userField = author ? (author.discriminator === "0" ? author.username : `${author.username}#${author.discriminator || '0000'}`) : "Unbekannt";
 
         const embed = {
             title: type === "EDIT" ? `📱 ✏️ Bearbeitet (Mobile)` : `📱 🗑️ Gelöscht (Mobile)`,
