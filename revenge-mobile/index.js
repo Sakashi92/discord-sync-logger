@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.1.0";
+    const VERSION = "1.2.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -58,19 +58,16 @@
     // --- Deduplication Logic ---
     async function isDuplicate(webhookUrl, messageId, type) {
         try {
-            // 1. Get Token lazily
             const TokenModule = metro.findByProps("getToken", "isTokenRequired");
             const token = TokenModule?.getToken?.();
             if (!token) return false;
 
-            // 2. Get Channel ID from Webhook URL
             const chRes = await fetch(webhookUrl.split("?")[0]);
             if (!chRes.ok) return false;
             const chData = await chRes.json();
             const channelId = chData.channel_id;
             if (!channelId) return false;
 
-            // 3. Fetch recent messages
             const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages?limit=20`, {
                 headers: { "Authorization": token }
             });
@@ -78,7 +75,6 @@
             const messages = await res.json();
             if (!Array.isArray(messages)) return false;
 
-            // 4. Check for existing log
             for (const msg of messages) {
                 if (!msg.embeds?.length) continue;
                 for (const embed of msg.embeds) {
@@ -91,7 +87,7 @@
                     const logType = isEdit ? "EDIT" : (isDelete ? "DELETE" : null);
 
                     if (logMsgId === messageId && logType === type) {
-                        return true; // Duplicate found!
+                        return true;
                     }
                 }
             }
@@ -105,17 +101,14 @@
         const url = storage.webhookUrl;
         if (!url || !url.startsWith("http")) return;
 
-        // --- ASYNC DELAY & DEDUPE CHECK ---
-        // Wait 2 seconds to let PC log first
+        // Async Delay & Dedupe
         await sleep(2000);
 
-        // Check if PC already logged it
         const duplicate = await isDuplicate(url, messageId, type);
         if (duplicate) {
             log.info(`Skipped duplicate ${type} for ${messageId}`);
             return;
         }
-        // ----------------------------------
 
         const attachmentLinks = attachments.map(a => a.url || a.proxy_url).join("\n") || "";
         const attachmentText = attachmentLinks ? `\n\n**📎 Anhänge:**\n${attachmentLinks}` : "";
@@ -146,7 +139,7 @@
         }
     }
 
-    // --- Handlers (Synchronous Wrappers) ---
+    // --- Handlers ---
     const onMessageUpdate = (event) => {
         try {
             const { message } = event;
@@ -160,8 +153,10 @@
 
             if (!author || shouldIgnore(author)) return;
             if (message.content === undefined) return;
+
+            // Check if it's our ghost message being updated? Unlikely since we don't sync back.
+
             if (oldContent !== undefined && oldContent !== message.content) {
-                // Fire and forget async log
                 sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
             }
             cacheMessage({ ...storeMsg, ...cached, ...message, author });
@@ -173,16 +168,45 @@
             const { id, channelId } = event;
             if (!id) return;
             if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
-            const storeMsg = MessageStore.getMessage(channelId, id);
+            // const storeMsg = MessageStore.getMessage(channelId, id); // Don't rely on store, it might be gone
             const cached = messageCache.get(id);
-            const author = cached?.author ?? storeMsg?.author;
+            const author = cached?.author; // removed storeMsg fallback
+
             if (!author || shouldIgnore(author)) return;
-            const content = cached?.content ?? storeMsg?.content;
-            const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
+            const content = cached?.content;
+            const attachments = cached?.attachments ?? [];
             if (!content && attachments.length === 0) return;
 
-            // Fire and forget async log
+            // 1. Send Log
             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
+
+            // 2. NoDelete (Ghost Message) Resurrection
+            if (storage.noDelete && content) {
+                const ghostId = id; // Try reusing ID to simulate persistence
+                const ghostContent = "```diff\n- " + content + "\n```"; // Red Diff Syntax
+
+                const ghostMsg = {
+                    id: ghostId,
+                    channel_id: channelId,
+                    author: author,
+                    content: ghostContent,
+                    timestamp: cached.timestamp ? cached.timestamp.toISOString() : new Date().toISOString(),
+                    state: "SENT",
+                    edited_timestamp: new Date().toISOString(),
+                    // Add some flags to maybe prevent it triggering other things?
+                };
+
+                // Dispatch CREATE to UI with a small delay to ensure DELETE is processed
+                setTimeout(() => {
+                    FluxDispatcher.dispatch({
+                        type: "MESSAGE_CREATE",
+                        channelId: channelId,
+                        message: ghostMsg,
+                        optimistic: true
+                    });
+                }, 100);
+            }
+
             messageCache.delete(id);
         } catch (e) { log.error("Delete Error", e); }
     };
@@ -192,7 +216,14 @@
     };
 
     const onMessageCreate = (event) => {
-        if (event.message) cacheMessage(event.message);
+        // Prevent caching our own Ghost Messages if possible?
+        if (event.message) {
+            if (event.message.content && event.message.content.startsWith("```diff\n- ")) {
+                // Likely a ghost message, don't cache it so we don't re-log its deletion
+                return;
+            }
+            cacheMessage(event.message);
+        }
     };
 
     const onMessagesLoad = (event) => {
@@ -207,6 +238,7 @@
             if (storage.ignoreSelf === undefined) storage.ignoreSelf = false;
             if (storage.ignoreBots === undefined) storage.ignoreBots = false;
             if (storage.showLoadToast === undefined) storage.showLoadToast = true;
+            if (storage.noDelete === undefined) storage.noDelete = true; // Default ON requested?
 
             FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
             FluxDispatcher.subscribe("MESSAGE_DELETE", onMessageDelete);
@@ -230,6 +262,7 @@
             const [ignoreSelf, setIgnoreSelf] = React.useState(storage.ignoreSelf ?? false);
             const [ignoreBots, setIgnoreBots] = React.useState(storage.ignoreBots ?? false);
             const [showLoadToast, setShowLoadToast] = React.useState(storage.showLoadToast ?? true);
+            const [noDelete, setNoDelete] = React.useState(storage.noDelete ?? true);
 
             const FormSection = Forms?.FormSection || View;
             const FormInput = Forms?.FormInput || Forms?.TextInput || ui.components?.TextInput || ReactNative.TextInput;
@@ -269,6 +302,14 @@
                 ),
 
                 React.createElement(View, { style: { marginTop: 20 } },
+                    React.createElement(Row, {
+                        label: "NoDelete (Show Deleted)",
+                        subLabel: "Keep deleted messages visible in Red",
+                        control: React.createElement(FormSwitch, {
+                            value: noDelete,
+                            onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; }
+                        })
+                    }),
                     React.createElement(Row, {
                         label: "Ignore Self",
                         subLabel: "Don't log your own message edits/deletes",
