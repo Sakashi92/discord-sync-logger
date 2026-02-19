@@ -3,13 +3,11 @@
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
     const { metro, logger, plugin, ui } = api;
     const { common } = metro;
-    const { FluxDispatcher, React, ReactNative } = common;
+    const { FluxDispatcher, React, ReactNative, clipboard } = common;
     const { storage } = plugin;
 
     // Use raw RN components
     const { View, Text, Switch, ScrollView, TouchableOpacity } = ReactNative;
-    // Use native alerts for input to avoid keyboard issues
-    const { showInputAlert } = ui.alerts;
     const { showToast } = ui.toasts;
 
     // --- Constants ---
@@ -196,33 +194,43 @@
                 )
             );
 
-            return React.createElement(ScrollView, { style: { flex: 1 } },
-                // Webhook URL Section using Alert instead of TextInput
-                React.createElement(TouchableOpacity, {
-                    onPress: () => {
-                        showInputAlert({
-                            title: "Webhook URL",
-                            placeholder: "https://discord.com/api/webhooks/...",
-                            initialValue: webhookUrl,
-                            confirmText: "Save",
-                            cancelText: "Cancel",
-                            onConfirm: (val) => {
-                                setWebhookUrl(val);
-                                storage.webhookUrl = val;
-                                showToast("URL saved!", 1); // 1 = success icon?
+            // Button style helper
+            const btnStyle = { backgroundColor: "#5865F2", padding: 10, borderRadius: 5, alignItems: "center", marginVertical: 5 };
+
+            return React.createElement(ScrollView, { style: { flex: 1, backgroundColor: "transparent" } },
+                // Webhook URL Section with Paste Button
+                React.createElement(View, { style: { padding: 15, borderBottomWidth: 1, borderBottomColor: "#333" } },
+                    React.createElement(Text, { style: { color: "white", fontSize: 16, fontWeight: "bold", marginBottom: 5 } }, "Webhook URL"),
+                    React.createElement(Text, { style: { color: "#ccc", fontSize: 12, marginBottom: 10, fontFamily: "monospace" } },
+                        webhookUrl ? (webhookUrl.substring(0, 30) + "...") : "Not Set"
+                    ),
+                    React.createElement(TouchableOpacity, {
+                        style: btnStyle,
+                        onPress: async () => {
+                            try {
+                                const content = await clipboard.getString();
+                                if (content && content.startsWith("http")) {
+                                    setWebhookUrl(content);
+                                    storage.webhookUrl = content;
+                                    showToast("Paste successful!", 1); // Success
+                                } else {
+                                    showToast("Clipboard does not contain a URL", 0); // Error?
+                                }
+                            } catch (e) {
+                                showToast("Paste failed", 0);
                             }
-                        });
-                    }
-                },
-                    React.createElement(View, { style: { padding: 15, borderBottomWidth: 1, borderBottomColor: "#333" } },
-                        React.createElement(Text, { style: { color: "white", fontSize: 16, fontWeight: "bold", marginBottom: 5 } }, "Webhook URL"),
-                        React.createElement(Text, { style: { color: "#ccc", fontSize: 14 } },
-                            webhookUrl ? webhookUrl : "Tap to set Webhook URL..."
-                        )
-                    )
+                        }
+                    }, React.createElement(Text, { style: { color: "white", fontWeight: "bold" } }, "Paste from Clipboard")),
+                    React.createElement(TouchableOpacity, {
+                        style: { ...btnStyle, backgroundColor: "#ED4245" },
+                        onPress: () => {
+                            setWebhookUrl("");
+                            storage.webhookUrl = "";
+                            showToast("URL cleared", 1);
+                        }
+                    }, React.createElement(Text, { style: { color: "white", fontWeight: "bold" } }, "Clear URL"))
                 ),
 
-                // Toggles
                 React.createElement(Row, {
                     label: "Ignore Self",
                     subLabel: "Don't log your own edits/deletes",
