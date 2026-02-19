@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.6.0";
+    const VERSION = "1.6.1";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -242,8 +242,11 @@
                             if (storage.editHistory) {
                                 const prevHistory = cached?.historyContent || "";
 
-                                // Create new History Block
-                                const ansiBlock = toAnsi(oldContent, "EDIT"); // Yellow
+                                // Create new History Block with Timestamp
+                                const timeStr = moment().format("HH:mm:ss");
+                                const contentWithTime = `${oldContent}\n[${timeStr}]`;
+
+                                const ansiBlock = toAnsi(contentWithTime, "EDIT"); // Yellow
                                 const newHistory = prevHistory + ansiBlock;
 
                                 // Modifying Embeds instead of Content
