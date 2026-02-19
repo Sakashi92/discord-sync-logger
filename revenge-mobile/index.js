@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.5.0";
+    const VERSION = "1.5.1";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -94,7 +94,11 @@
                     const footer = embed.footer?.text;
                     if (!footer || !footer.includes("id:")) continue;
 
-                    const logMsgId = footer.split("|")[0].replace("id:", "").trim();
+                    // Regex to extract ID regardless of terminator (| or • or space)
+                    const idMatch = footer.match(/id:\s*(\d+)/);
+                    if (!idMatch) continue;
+
+                    const logMsgId = idMatch[1];
                     const isEdit = embed.title?.includes("✏️");
                     const isDelete = embed.title?.includes("🗑️");
                     const logType = isEdit ? "EDIT" : (isDelete ? "DELETE" : null);
