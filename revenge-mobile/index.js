@@ -1,14 +1,13 @@
 (function () {
     // We capture 'vendetta' from the wrapper scope: vendetta => { return ... }
-    // This contains the scoped 'plugin' (storage) and 'logger'.
-
-    // Safety check just in case
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
     const { metro, logger, plugin, ui } = api;
     const { common } = metro;
-    const { FluxDispatcher, React } = common;
+    const { FluxDispatcher, React, ReactNative } = common;
     const { storage } = plugin;
-    const { Forms } = ui.components;
+
+    // Use raw RN components to be 100% safe
+    const { View, Text, TextInput, Switch, ScrollView, StyleSheet } = ReactNative;
 
     // --- Constants ---
     const LOG_PREFIX = "UniversalSyncLogger";
@@ -54,14 +53,10 @@
 
     function shouldIgnore(author) {
         if (!author) return false;
-
-        // Refresh store ref if needed
         if (!UserStore) UserStore = metro.findByStoreName("UserStore");
         const currentUser = UserStore?.getCurrentUser();
-
         const isBot = author.bot;
         const isSelf = currentUser && author.id === currentUser.id;
-
         if (storage.ignoreBots && isBot) return true;
         if (storage.ignoreSelf && isSelf) return true;
         return false;
@@ -73,7 +68,6 @@
 
         let attachmentLinks = attachments.map(a => a.url || a.proxy_url).join("\n") || "";
         const attachmentText = attachmentLinks ? `\n\n**📎 Gelöschte Anhänge:**\n${attachmentLinks}` : "";
-
         const userField = author ? `${author.username}#${author.discriminator || '0000'}` : "Unbekannt";
 
         const embed = {
@@ -105,7 +99,6 @@
         try {
             const { message } = event;
             if (!message || !message.id || !message.channel_id) return;
-
             if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
 
             const storeMsg = MessageStore.getMessage(message.channel_id, message.id);
@@ -117,15 +110,12 @@
 
             if (!author) return;
             if (shouldIgnore(author)) return;
-
             if (message.content === undefined) return;
 
             const newContent = message.content;
-
             if (oldContent !== undefined && oldContent !== newContent) {
                 sendLog("EDIT", message.id, oldContent, newContent, author, message.channel_id, attachments);
             }
-
             cacheMessage({ ...storeMsg, ...cached, ...message, author: author });
         } catch (e) {
             log.error("Error in onMessageUpdate", e);
@@ -136,7 +126,6 @@
         try {
             const { id, channelId } = event;
             if (!id || !channelId) return;
-
             if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
 
             const storeMsg = MessageStore.getMessage(channelId, id);
@@ -148,9 +137,7 @@
 
             if (!content && (!attachments || attachments.length === 0)) return;
             if (author && shouldIgnore(author)) return;
-
             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
-
             messageCache.delete(id);
         } catch (e) {
             log.error("Error in onMessageDelete", e);
@@ -168,12 +155,10 @@
         msgs.forEach(cacheMessage);
     };
 
-    // Return the Plugin Object
+    // Return Plugin Object
     return {
         onLoad: () => {
             log.info("Plugin loading...");
-
-            // Set defaults safely
             if (storage.webhookUrl === undefined) storage.webhookUrl = "";
             if (storage.ignoreSelf === undefined) storage.ignoreSelf = false;
             if (storage.ignoreBots === undefined) storage.ignoreBots = false;
@@ -185,7 +170,6 @@
                 FluxDispatcher.subscribe("MESSAGE_CREATE", handleLateCache),
                 FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", handleLateCache)
             ];
-
             log.info("Plugin loaded.");
         },
         onUnload: () => {
@@ -195,25 +179,35 @@
             log.info("Plugin unloaded.");
         },
         settings: () => {
-            const { FormRow, TextInput, Switch } = Forms;
-
             const [webhookUrl, setWebhookUrl] = React.useState(storage.webhookUrl ?? "");
             const [ignoreSelf, setIgnoreSelf] = React.useState(storage.ignoreSelf ?? false);
             const [ignoreBots, setIgnoreBots] = React.useState(storage.ignoreBots ?? false);
 
-            return React.createElement(React.Fragment, null,
-                React.createElement(FormRow, {
-                    label: "Webhook URL",
-                    subLabel: "Discord Webhook URL for logging (Hidden)"
-                }, React.createElement(TextInput, {
-                    value: webhookUrl,
-                    placeholder: "https://discord.com/api/webhooks/...",
-                    onChange: (val) => {
-                        setWebhookUrl(val);
-                        storage.webhookUrl = val;
-                    }
-                })),
-                React.createElement(FormRow, {
+            const Row = ({ label, subLabel, control }) => (
+                React.createElement(View, { style: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 15, borderBottomWidth: 1, borderBottomColor: "#333" } },
+                    React.createElement(View, { style: { flex: 1, marginRight: 10 } },
+                        React.createElement(Text, { style: { color: "white", fontSize: 16, fontWeight: "bold" } }, label),
+                        subLabel && React.createElement(Text, { style: { color: "#aaa", fontSize: 12 } }, subLabel)
+                    ),
+                    control
+                )
+            );
+
+            return React.createElement(ScrollView, { style: { flex: 1 } },
+                React.createElement(View, { style: { padding: 15 } },
+                    React.createElement(Text, { style: { color: "white", marginBottom: 5, fontWeight: "bold" } }, "Webhook URL"),
+                    React.createElement(TextInput, {
+                        style: { backgroundColor: "#202225", color: "white", padding: 10, borderRadius: 5, fontSize: 14 },
+                        placeholder: "https://discord.com/api/webhooks/...",
+                        placeholderTextColor: "#72767d",
+                        value: webhookUrl,
+                        onChangeText: (val) => {
+                            setWebhookUrl(val);
+                            storage.webhookUrl = val;
+                        }
+                    })
+                ),
+                React.createElement(Row, {
                     label: "Ignore Self",
                     subLabel: "Don't log your own edits/deletes",
                     control: React.createElement(Switch, {
@@ -224,7 +218,7 @@
                         }
                     })
                 }),
-                React.createElement(FormRow, {
+                React.createElement(Row, {
                     label: "Ignore Bots",
                     subLabel: "Don't log bot edits/deletes",
                     control: React.createElement(Switch, {
