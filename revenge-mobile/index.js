@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.6.1";
+    const VERSION = "1.7.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -12,6 +12,7 @@
     const { Forms, Button } = ui.components || {};
     const { showToast } = ui.toasts || {};
 
+    // Runtime Cache (for dedupe logic etc)
     const messageCache = new Map();
     let MessageStore = metro.findByStoreName("MessageStore");
     let UserStore = metro.findByStoreName("UserStore");
@@ -29,6 +30,32 @@
         return `\`\`\`ansi\n\u001b[0;${bgCode}m${text}\u001b[0m\n\`\`\``;
     }
 
+    // --- Persistence Helper ---
+    function saveHistory(id, historyContent) {
+        if (!storage.history) storage.history = {};
+        storage.history[id] = historyContent;
+        pruneHistory();
+    }
+
+    function getHistory(id) {
+        if (!storage.history) return null;
+        return storage.history[id] || null;
+    }
+
+    function pruneHistory() {
+        if (!storage.history) return;
+        const keys = Object.keys(storage.history);
+        if (keys.length > 500) {
+            // Sort by ID (Snowflake) - ascending (oldest first)
+            // String comparison works for snowflakes of same length, but safe BigInt compare is better.
+            // Simplified: String sort is "okay" for recent years. 
+            // We strip the oldest ~50.
+            keys.sort();
+            const toRemove = keys.slice(0, keys.length - 450); // Keep 450
+            toRemove.forEach(k => delete storage.history[k]);
+        }
+    }
+
     function cacheMessage(msg) {
         if (!msg?.id) return;
         if (messageCache.size > 500) {
@@ -36,8 +63,8 @@
             if (firstKey) messageCache.delete(firstKey);
         }
 
-        const existing = messageCache.get(msg.id);
-        const historyContent = existing?.historyContent || null;
+        // Try get history from Storage first, then Memory
+        const historyContent = getHistory(msg.id); // Persistent
 
         let attachments = [];
         if (msg.attachments) {
@@ -45,12 +72,7 @@
             else if (typeof msg.attachments.values === 'function') attachments = Array.from(msg.attachments.values());
         }
 
-        // We want to cache the CLEAN content.
         let cleanContent = msg.content ?? "";
-
-        // If the message is coming from a Store update that ALREADY has our artifacts, we might be caching dirty data?
-        // But with this V1.6.0 approach, we don't put artifacts in content. 
-        // So msg.content should be clean (unless another plugin dirtied it).
 
         messageCache.set(msg.id, {
             content: cleanContent,
@@ -167,17 +189,45 @@
             if (storage.showLoadToast === undefined) storage.showLoadToast = true;
             if (storage.noDelete === undefined) storage.noDelete = true;
             if (storage.editHistory === undefined) storage.editHistory = true;
+            if (storage.history === undefined) storage.history = {}; // Init Storage
 
             const unpatch = patcher.before("dispatch", FluxDispatcher, (args) => {
                 const event = args[0];
                 if (!event || !event.type) return;
 
-                if (event.type === "MESSAGE_CREATE") {
-                    if (event.message) cacheMessage(event.message);
+                // --- PERSISTENCE: INJECT HISTORY ON LOAD ---
+                if (event.type === "LOAD_MESSAGES_SUCCESS") {
+                    if (storage.editHistory && event.messages && Array.isArray(event.messages)) {
+                        event.messages.forEach(msg => {
+                            const savedHistory = getHistory(msg.id);
+                            if (savedHistory) {
+                                // Inject Embed
+                                if (!msg.embeds) msg.embeds = [];
+
+                                // Check (weakly) if we already have it to be safe
+                                // But LOAD happens once usually per fetch.
+
+                                const historyEmbed = {
+                                    type: "rich",
+                                    description: savedHistory,
+                                    color: 0xFEE75C // Yellow
+                                };
+
+                                // Append
+                                // Filter existing yellow embeds to avoid dupe on re-fetch?
+                                const cleanEmbeds = msg.embeds.filter(e => e.color !== 0xFEE75C);
+                                msg.embeds = [...cleanEmbeds, historyEmbed];
+                            }
+                            cacheMessage(msg);
+                        });
+                    } else if (event.messages) {
+                        event.messages.forEach(cacheMessage);
+                    }
                     return;
                 }
-                if (event.type === "LOAD_MESSAGES_SUCCESS") {
-                    if (event.messages) event.messages.forEach(cacheMessage);
+
+                if (event.type === "MESSAGE_CREATE") {
+                    if (event.message) cacheMessage(event.message);
                     return;
                 }
 
@@ -240,50 +290,38 @@
                             sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
 
                             if (storage.editHistory) {
-                                const prevHistory = cached?.historyContent || "";
+                                // Load saved history from storage if missing in cache (re-hydration)
+                                const prevHistory = cached?.historyContent || getHistory(message.id) || "";
 
-                                // Create new History Block with Timestamp
                                 const timeStr = moment().format("HH:mm:ss");
                                 const contentWithTime = `${oldContent}\n[${timeStr}]`;
 
-                                const ansiBlock = toAnsi(contentWithTime, "EDIT"); // Yellow
+                                const ansiBlock = toAnsi(contentWithTime, "EDIT");
                                 const newHistory = prevHistory + ansiBlock;
 
-                                // Modifying Embeds instead of Content
                                 let embeds = message.embeds ? [...message.embeds] : [];
 
-                                // Remove our own previous history embed if it exists?
-                                // To identify our embed, we could check description or color.
-                                // Or we just append. Just appending is safer to not delete real embeds.
-                                // But eventually we will have duplicates.
-                                // Ideally, we merge.
-
-                                // Simpler: Create a History Embed
-                                // This won't work perfectly if there are multiple listeners, but for now:
                                 const historyEmbed = {
                                     type: "rich",
                                     description: newHistory,
-                                    color: 0xFEE75C // Yellow
+                                    color: 0xFEE75C
                                 };
 
-                                // We should probably filter out previous history embeds?
-                                // That requires tagging.
-                                // Let's simplify: Just append. 
-                                // The user will see multiple yellow blocks if edited multiple times.
-                                // Actually, `prevHistory` accumulates ALL previous edits.
-                                // So we only display ONE history embed with ALL history.
-                                // We need to remove the OLD history embed.
-
-                                // Filter existing embeds (assuming users don't use Yellow embeds with ANSI often)
-                                // This is weak heuristics but functional for personal use.
                                 const cleanEmbeds = embeds.filter(e => e.color !== 0xFEE75C);
-
                                 event.message.embeds = [...cleanEmbeds, historyEmbed];
 
-                                // Content remains CLEAN (just the new text)
-                                // event.message.content = message.content; // Already set
+                                // Save to Persistence
+                                saveHistory(message.id, newHistory);
 
-                                updateCacheHistory(message.id, message.content, newHistory, author, message.channel_id, attachments);
+                                // Update Runtime Cache
+                                messageCache.set(message.id, {
+                                    content: message.content,
+                                    author: author,
+                                    channelId: message.channel_id,
+                                    attachments: attachments,
+                                    timestamp: new Date(),
+                                    historyContent: newHistory
+                                });
                             } else {
                                 cacheMessage({ ...storeMsg, ...cached, ...message, author });
                             }
@@ -379,15 +417,4 @@
             );
         }
     };
-
-    function updateCacheHistory(id, cleanContent, historyContent, author, channelId, attachments) {
-        messageCache.set(id, {
-            content: cleanContent,
-            author: author,
-            channelId: channelId,
-            attachments: attachments,
-            timestamp: new Date(),
-            historyContent: historyContent
-        });
-    }
 })()
