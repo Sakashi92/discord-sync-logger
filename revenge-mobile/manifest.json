@@ -1,15 +1,12 @@
 {
     "name": "UniversalSyncLogger",
-    "description": "Logs Message Edits and Deletes",
+    "description": "Logs deleted and edited messages to a webhook (Mobile Port).",
     "authors": [
         {
-            "name": "Sakashi",
-            "id": "755005704193638531"
+            "name": "Sakashi92",
+            "id": "Sakashi92"
         }
     ],
     "main": "index.js",
-    "hash": "v1.0.1",
-    "vendetta": {
-        "icon": "ic_sync_24px"
-    }
+    "hash": "v1.0.7"
 }
