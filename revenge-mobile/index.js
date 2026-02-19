@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.3.0";
+    const VERSION = "1.3.1";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -32,7 +32,6 @@
             if (firstKey) messageCache.delete(firstKey);
         }
 
-        // Preserve historyContent if it exists in current cache
         const existing = messageCache.get(msg.id);
         const historyContent = existing?.historyContent || null;
 
@@ -48,15 +47,8 @@
             channelId: msg.channel_id,
             attachments: attachments,
             timestamp: new Date(),
-            historyContent: historyContent // Persist history
+            historyContent: historyContent
         });
-    }
-
-    function updateCacheHistory(id, newHistoryContent) {
-        const existing = messageCache.get(id);
-        if (existing) {
-            messageCache.set(id, { ...existing, historyContent: newHistoryContent });
-        }
     }
 
     function shouldIgnore(author) {
@@ -157,14 +149,12 @@
         try {
             const { message } = event;
             if (!message?.id) return;
-            // Prevent Log/Ghost Loop
             if (message.__isGhost) return;
 
             if (!MessageStore) MessageStore = metro.findByStoreName("MessageStore");
             const storeMsg = MessageStore.getMessage(message.channel_id, message.id);
             const cached = messageCache.get(message.id);
 
-            // Clean Content Recovery
             const oldContent = cached?.content ?? storeMsg?.content;
             const author = cached?.author ?? storeMsg?.author ?? message.author;
             const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
@@ -173,56 +163,47 @@
             if (message.content === undefined) return;
 
             if (oldContent !== undefined && oldContent !== message.content) {
-                // 1. Send Webhook Log (Async)
                 sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
 
-                // 2. Edit History UI (Ghost Update)
                 if (storage.editHistory) {
-                    // Previous Display (Ghost) Content
                     const prevDisplay = cached?.historyContent || null;
 
-                    // Construct New Block
-                    // If no previous history, oldContent is the Origin
+                    // CLEANER STYLING: Quote + Strikethrough + Emoji
+                    // "> ✏️ ~~Old Content~~"
                     let diffBlock = "";
+                    const sanitizedOld = oldContent.replace(/\n/g, "\n> "); // Quote multilines
+
                     if (!prevDisplay) {
-                        diffBlock = `\`\`\`diff\n- ${oldContent}\n\`\`\`\n`;
+                        diffBlock = `> ✏️ ~~${sanitizedOld}~~\n`;
                     } else {
-                        // We append the new "Old" (which was the current before this edit)
-                        // Actually, if we have history, 'oldContent' IS the previous 'current'.
-                        // So we just diff that.
-                        diffBlock = `${prevDisplay}\`\`\`diff\n- ${oldContent}\n\`\`\`\n`;
+                        diffBlock = `${prevDisplay}> ✏️ ~~${sanitizedOld}~~\n`;
                     }
 
                     const newDisplay = `${diffBlock}${message.content}`;
 
-                    // Dispatch Ghost Update
                     setTimeout(() => {
                         FluxDispatcher.dispatch({
                             type: "MESSAGE_UPDATE",
                             message: {
                                 ...message,
                                 content: newDisplay,
-                                __isGhost: true // Marker to ignore next loop
+                                __isGhost: true
                             }
                         });
                     }, 50);
 
-                    // Update Cache with BOTH Clean and History
-                    // 'message' has the new Clean content (from server event)
-                    // We also save 'newDisplay' as 'historyContent'
                     messageCache.set(message.id, {
-                        content: message.content, // Clean V3
+                        content: message.content,
                         author,
                         channelId: message.channel_id,
                         attachments,
                         timestamp: new Date(),
-                        historyContent: newDisplay // V1...V2...V3
+                        historyContent: newDisplay
                     });
 
-                    return; // Done, cache set manually
+                    return;
                 }
             }
-            // Standard Cache (if not Edit History flow)
             cacheMessage({ ...storeMsg, ...cached, ...message, author });
         } catch (e) { log.error("Update Error", e); }
     };
@@ -242,27 +223,47 @@
             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
 
             if (storage.noDelete && content) {
-                // If we have history content, try to use that?
-                // Actually the user wants to see it red.
-                // If it was valid history: `[Diffs] \n Current`.
-                // We want to make the `Current` red too.
-
                 let displayContent = cached.historyContent || content;
-                // If it was history, the last part is normal text "Current".
-                // We wrap the whole thing? Or just the end?
-                // Wrapping potential existing code blocks in another code block breaks markdown.
-                // Simple approach: Surround *everything* in diff? No.
-
-                // If history exists, it ends with ` \n Current`.
-                // We can replace the last `Current` with ` ```diff - Current ``` `.
-
                 let finalGhostContent = "";
+
+                // Remove existing quotes? No, keep history.
+                // Just wrap the "Current" (now deleted) in Strikethrough Quote.
+
                 if (cached.historyContent) {
-                    // Hacky split?
-                    // Or just display "DELETED" banner?
-                    finalGhostContent = displayContent + "\n```diff\n- [GELÖSCHT]\n```";
+                    // historyContent ended with the *clean* content at the bottom.
+                    // We need to find that clean content and wrap it.
+                    // Simpler: Just append a "Deleted" marker?
+                    // User wants to see the content.
+
+                    // Since we appended `> ` for history, the "current" text has no quote.
+                    // So we can assume the last part is the text.
+                    // Let's just create a new block for simplicity.
+
+                    // Actually, if we just want to mark it red/deleted, we can replae the WHOLE thing
+                    // or just the last part.
+                    // Let's replace the last part (current) with Strikethrough Quote.
+
+                    // Ideally we would know what the "Current" part was.
+                    // cached.content IS the clean current content!
+
+                    const cleanCurrent = cached.content;
+                    const cleanDisplay = `> 🗑️ ~~${cleanCurrent.replace(/\n/g, "\n> ")}~~`;
+
+                    // We need to keep the OLD history blocks (which are already formatted)
+                    // But `historyContent` INCLUDES the clean current at the end.
+                    // So we have to strip it? That's risky.
+
+                    // Let's just create a full history rebuild?
+                    // We stored `historyContent` = `> Old \n Current`.
+                    // We want `> Old \n > Deleted`.
+                    // This is complex string manipulation.
+
+                    // Alternative: Append `[GELÖSCHT]`
+                    finalGhostContent = `${displayContent} \n# 🗑️ [GELÖSCHT]`;
+
                 } else {
-                    finalGhostContent = "```diff\n- " + content + "\n```";
+                    // No history, just one message.
+                    finalGhostContent = `> 🗑️ ~~${content.replace(/\n/g, "\n> ")}~~`;
                 }
 
                 const ghostMsg = {
@@ -293,17 +294,9 @@
         if (event.ids) event.ids.forEach(id => onMessageDelete({ id, channelId: event.channel_id }));
     };
 
-    const onMessageCreate = (event) => {
-        if (event.message && !event.message.__isGhost) {
-            cacheMessage(event.message);
-        }
-    };
+    const onMessageCreate = (event) => { if (event.message && !event.message.__isGhost) cacheMessage(event.message); };
+    const onMessagesLoad = (event) => { if (event.messages) event.messages.forEach(cacheMessage); };
 
-    const onMessagesLoad = (event) => {
-        if (event.messages) event.messages.forEach(cacheMessage);
-    };
-
-    // --- Plugin ---
     return {
         onLoad: () => {
             log.info("Loading V" + VERSION);
@@ -368,7 +361,6 @@
                         value: webhookUrl,
                         placeholder: "https://discord.com/api/webhooks/...",
                         onChangeText: handleTextChange,
-                        onChange: handleTextChange,
                         style: !Forms?.FormInput ? { backgroundColor: "#202225", color: "white", padding: 10, borderRadius: 5 } : {}
                     }),
                     React.createElement(Text, { style: { color: "#72767d", fontSize: 11, marginTop: 5 } },
@@ -377,46 +369,11 @@
                 ),
 
                 React.createElement(View, { style: { marginTop: 20 } },
-                    React.createElement(Row, {
-                        label: "NoDelete",
-                        subLabel: "Show deleted messages in red",
-                        control: React.createElement(FormSwitch, {
-                            value: noDelete,
-                            onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; }
-                        })
-                    }),
-                    React.createElement(Row, {
-                        label: "Edit History",
-                        subLabel: "Show old edits above current text",
-                        control: React.createElement(FormSwitch, {
-                            value: editHistory,
-                            onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; }
-                        })
-                    }),
-                    React.createElement(Row, {
-                        label: "Ignore Self",
-                        subLabel: "Don't log own messages",
-                        control: React.createElement(FormSwitch, {
-                            value: ignoreSelf,
-                            onValueChange: (v) => { setIgnoreSelf(v); storage.ignoreSelf = v; }
-                        })
-                    }),
-                    React.createElement(Row, {
-                        label: "Ignore Bots",
-                        subLabel: "Don't log bot messages",
-                        control: React.createElement(FormSwitch, {
-                            value: ignoreBots,
-                            onValueChange: (v) => { setIgnoreBots(v); storage.ignoreBots = v; }
-                        })
-                    }),
-                    React.createElement(Row, {
-                        label: "Show Load Toast",
-                        subLabel: "Startup notification",
-                        control: React.createElement(FormSwitch, {
-                            value: showLoadToast,
-                            onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; }
-                        })
-                    })
+                    React.createElement(Row, { label: "NoDelete", subLabel: "Quote deleted messages", control: React.createElement(FormSwitch, { value: noDelete, onValueChange: (v) => { setNoDelete(v); storage.noDelete = v; } }) }),
+                    React.createElement(Row, { label: "Edit History", subLabel: "Quote old edits", control: React.createElement(FormSwitch, { value: editHistory, onValueChange: (v) => { setEditHistory(v); storage.editHistory = v; } }) }),
+                    React.createElement(Row, { label: "Ignore Self", subLabel: "Don't log own messages", control: React.createElement(FormSwitch, { value: ignoreSelf, onValueChange: (v) => { setIgnoreSelf(v); storage.ignoreSelf = v; } }) }),
+                    React.createElement(Row, { label: "Ignore Bots", subLabel: "Don't log bot messages", control: React.createElement(FormSwitch, { value: ignoreBots, onValueChange: (v) => { setIgnoreBots(v); storage.ignoreBots = v; } }) }),
+                    React.createElement(Row, { label: "Show Load Toast", subLabel: "Startup notification", control: React.createElement(FormSwitch, { value: showLoadToast, onValueChange: (v) => { setShowLoadToast(v); storage.showLoadToast = v; } }) })
                 ),
 
                 React.createElement(View, { style: { marginTop: 30, marginBottom: 50 } },
