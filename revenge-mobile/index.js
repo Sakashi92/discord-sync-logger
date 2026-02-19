@@ -1,5 +1,5 @@
 (function () {
-    const VERSION = "1.0.9";
+    const VERSION = "1.1.0";
     const LOG_PREFIX = `UniversalSyncLogger V${VERSION}`;
 
     const api = typeof vendetta !== "undefined" ? vendetta : window.vendetta;
@@ -22,6 +22,8 @@
         info: (...args) => logger.info(`${LOG_PREFIX}:`, ...args),
         error: (...args) => logger.error(`${LOG_PREFIX}:`, ...args),
     };
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
     function cacheMessage(msg) {
         if (!msg?.id) return;
@@ -53,9 +55,67 @@
         return false;
     }
 
+    // --- Deduplication Logic ---
+    async function isDuplicate(webhookUrl, messageId, type) {
+        try {
+            // 1. Get Token lazily
+            const TokenModule = metro.findByProps("getToken", "isTokenRequired");
+            const token = TokenModule?.getToken?.();
+            if (!token) return false;
+
+            // 2. Get Channel ID from Webhook URL
+            const chRes = await fetch(webhookUrl.split("?")[0]);
+            if (!chRes.ok) return false;
+            const chData = await chRes.json();
+            const channelId = chData.channel_id;
+            if (!channelId) return false;
+
+            // 3. Fetch recent messages
+            const res = await fetch(`https://discord.com/api/v9/channels/${channelId}/messages?limit=20`, {
+                headers: { "Authorization": token }
+            });
+            if (!res.ok) return false;
+            const messages = await res.json();
+            if (!Array.isArray(messages)) return false;
+
+            // 4. Check for existing log
+            for (const msg of messages) {
+                if (!msg.embeds?.length) continue;
+                for (const embed of msg.embeds) {
+                    const footer = embed.footer?.text;
+                    if (!footer || !footer.includes("id:")) continue;
+
+                    const logMsgId = footer.split("|")[0].replace("id:", "").trim();
+                    const isEdit = embed.title?.includes("✏️");
+                    const isDelete = embed.title?.includes("🗑️");
+                    const logType = isEdit ? "EDIT" : (isDelete ? "DELETE" : null);
+
+                    if (logMsgId === messageId && logType === type) {
+                        return true; // Duplicate found!
+                    }
+                }
+            }
+        } catch (e) {
+            log.error("Dedupe check failed", e);
+        }
+        return false;
+    }
+
     async function sendLog(type, messageId, oldContent, newContent, author, channelId, attachments = []) {
         const url = storage.webhookUrl;
         if (!url || !url.startsWith("http")) return;
+
+        // --- ASYNC DELAY & DEDUPE CHECK ---
+        // Wait 2 seconds to let PC log first
+        await sleep(2000);
+
+        // Check if PC already logged it
+        const duplicate = await isDuplicate(url, messageId, type);
+        if (duplicate) {
+            log.info(`Skipped duplicate ${type} for ${messageId}`);
+            return;
+        }
+        // ----------------------------------
 
         const attachmentLinks = attachments.map(a => a.url || a.proxy_url).join("\n") || "";
         const attachmentText = attachmentLinks ? `\n\n**📎 Anhänge:**\n${attachmentLinks}` : "";
@@ -86,7 +146,7 @@
         }
     }
 
-    // --- Handlers ---
+    // --- Handlers (Synchronous Wrappers) ---
     const onMessageUpdate = (event) => {
         try {
             const { message } = event;
@@ -101,6 +161,7 @@
             if (!author || shouldIgnore(author)) return;
             if (message.content === undefined) return;
             if (oldContent !== undefined && oldContent !== message.content) {
+                // Fire and forget async log
                 sendLog("EDIT", message.id, oldContent, message.content, author, message.channel_id, attachments);
             }
             cacheMessage({ ...storeMsg, ...cached, ...message, author });
@@ -120,6 +181,7 @@
             const attachments = cached?.attachments ?? (storeMsg?.attachments ? Array.from(storeMsg.attachments) : []);
             if (!content && attachments.length === 0) return;
 
+            // Fire and forget async log
             sendLog("DELETE", id, content || "", "", author, channelId, attachments);
             messageCache.delete(id);
         } catch (e) { log.error("Delete Error", e); }
