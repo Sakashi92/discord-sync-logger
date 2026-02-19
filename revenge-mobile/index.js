@@ -6,8 +6,11 @@
     const { FluxDispatcher, React, ReactNative } = common;
     const { storage } = plugin;
 
-    // Use raw RN components to be 100% safe
-    const { View, Text, TextInput, Switch, ScrollView, StyleSheet } = ReactNative;
+    // Use raw RN components
+    const { View, Text, Switch, ScrollView, TouchableOpacity } = ReactNative;
+    // Use native alerts for input to avoid keyboard issues
+    const { showInputAlert } = ui.alerts;
+    const { showToast } = ui.toasts;
 
     // --- Constants ---
     const LOG_PREFIX = "UniversalSyncLogger";
@@ -194,19 +197,32 @@
             );
 
             return React.createElement(ScrollView, { style: { flex: 1 } },
-                React.createElement(View, { style: { padding: 15 } },
-                    React.createElement(Text, { style: { color: "white", marginBottom: 5, fontWeight: "bold" } }, "Webhook URL"),
-                    React.createElement(TextInput, {
-                        style: { backgroundColor: "#202225", color: "white", padding: 10, borderRadius: 5, fontSize: 14 },
-                        placeholder: "https://discord.com/api/webhooks/...",
-                        placeholderTextColor: "#72767d",
-                        value: webhookUrl,
-                        onChangeText: (val) => {
-                            setWebhookUrl(val);
-                            storage.webhookUrl = val;
-                        }
-                    })
+                // Webhook URL Section using Alert instead of TextInput
+                React.createElement(TouchableOpacity, {
+                    onPress: () => {
+                        showInputAlert({
+                            title: "Webhook URL",
+                            placeholder: "https://discord.com/api/webhooks/...",
+                            initialValue: webhookUrl,
+                            confirmText: "Save",
+                            cancelText: "Cancel",
+                            onConfirm: (val) => {
+                                setWebhookUrl(val);
+                                storage.webhookUrl = val;
+                                showToast("URL saved!", 1); // 1 = success icon?
+                            }
+                        });
+                    }
+                },
+                    React.createElement(View, { style: { padding: 15, borderBottomWidth: 1, borderBottomColor: "#333" } },
+                        React.createElement(Text, { style: { color: "white", fontSize: 16, fontWeight: "bold", marginBottom: 5 } }, "Webhook URL"),
+                        React.createElement(Text, { style: { color: "#ccc", fontSize: 14 } },
+                            webhookUrl ? webhookUrl : "Tap to set Webhook URL..."
+                        )
+                    )
                 ),
+
+                // Toggles
                 React.createElement(Row, {
                     label: "Ignore Self",
                     subLabel: "Don't log your own edits/deletes",
